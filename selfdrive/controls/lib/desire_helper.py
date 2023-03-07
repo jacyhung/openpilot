@@ -5,7 +5,7 @@ from common.realtime import DT_MDL
 LaneChangeState = log.LateralPlan.LaneChangeState
 LaneChangeDirection = log.LateralPlan.LaneChangeDirection
 
-LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
+LANE_CHANGE_SPEED_MIN = 0 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 
 DESIRES = {
@@ -18,14 +18,14 @@ DESIRES = {
   LaneChangeDirection.left: {
     LaneChangeState.off: log.LateralPlan.Desire.none,
     LaneChangeState.preLaneChange: log.LateralPlan.Desire.none,
-    LaneChangeState.laneChangeStarting: log.LateralPlan.Desire.laneChangeLeft,
-    LaneChangeState.laneChangeFinishing: log.LateralPlan.Desire.laneChangeLeft,
+    LaneChangeState.laneChangeStarting: log.LateralPlan.Desire.turnLeft,
+    LaneChangeState.laneChangeFinishing: log.LateralPlan.Desire.turnLeft,
   },
   LaneChangeDirection.right: {
     LaneChangeState.off: log.LateralPlan.Desire.none,
     LaneChangeState.preLaneChange: log.LateralPlan.Desire.none,
-    LaneChangeState.laneChangeStarting: log.LateralPlan.Desire.laneChangeRight,
-    LaneChangeState.laneChangeFinishing: log.LateralPlan.Desire.laneChangeRight,
+    LaneChangeState.laneChangeStarting: log.LateralPlan.Desire.turnRight,
+    LaneChangeState.laneChangeFinishing: log.LateralPlan.Desire.turnRight,
   },
 }
 
