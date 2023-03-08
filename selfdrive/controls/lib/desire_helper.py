@@ -5,7 +5,7 @@ from common.realtime import DT_MDL
 LaneChangeState = log.LateralPlan.LaneChangeState
 LaneChangeDirection = log.LateralPlan.LaneChangeDirection
 
-LANE_CHANGE_SPEED_MIN = 1 * CV.MPH_TO_MS
+LANE_CHANGE_SPEED_MIN = 0 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 
 DESIRES = {
@@ -19,13 +19,13 @@ DESIRES = {
     LaneChangeState.off: log.LateralPlan.Desire.none,
     LaneChangeState.preLaneChange: log.LateralPlan.Desire.none,
     LaneChangeState.laneChangeStarting: log.LateralPlan.Desire.turnLeft,
-    LaneChangeState.laneChangeFinishing: log.LateralPlan.Desire.turnLeft,
+    LaneChangeState.laneChangeFinishing: log.LateralPlan.Desire.none,
   },
   LaneChangeDirection.right: {
     LaneChangeState.off: log.LateralPlan.Desire.none,
     LaneChangeState.preLaneChange: log.LateralPlan.Desire.none,
     LaneChangeState.laneChangeStarting: log.LateralPlan.Desire.turnRight,
-    LaneChangeState.laneChangeFinishing: log.LateralPlan.Desire.turnRight,
+    LaneChangeState.laneChangeFinishing: log.LateralPlan.Desire.none,
   },
 }
 
@@ -69,7 +69,7 @@ class DesireHelper:
 
         if not one_blinker or below_lane_change_speed:
           self.lane_change_state = LaneChangeState.off
-        elif not blindspot_detected:
+        elif torque_applied and not blindspot_detected:
           self.lane_change_state = LaneChangeState.laneChangeStarting
 
       # LaneChangeState.laneChangeStarting
