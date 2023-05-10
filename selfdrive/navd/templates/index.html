@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en" >
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>openpilot nav</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/gh/alpinejs/alpine@v2.x.x/dist/alpine.js" defer></script>
+<link rel="stylesheet" href="https://unpkg.com/flowbite@1.5.3/dist/flowbite.min.css" />
+<script src="https://unpkg.com/flowbite@1.5.3/dist/flowbite.js"></script>
+<script src="https://code.jquery.com/jquery-3.6.1.min.js"></script>
+<link href="https://api.mapbox.com/mapbox-assembly/v1.3.0/assembly.min.css" rel="stylesheet">
+<script id="search-js" defer="" src="https://api.mapbox.com/search-js/v1.0.0-beta.14/web.js"></script>
+<style>
+
+
+		[type="checkbox"] {
+			box-sizing: border-box;
+			padding: 0;
+		}
+
+		.form-checkbox,
+		.form-radio {
+			-webkit-appearance: none;
+			-moz-appearance: none;
+			appearance: none;
+			-webkit-print-color-adjust: exact;
+			color-adjust: exact;
+			display: inline-block;
+			vertical-align: middle;
+			background-origin: border-box;
+			-webkit-user-select: none;
+			-moz-user-select: none;
+			-ms-user-select: none;
+			user-select: none;
+			flex-shrink: 0;
+			color: currentColor;
+			background-color: #fff;
+			border-color: #e2e8f0;
+			border-width: 1px;
+			height: 1.4em;
+			width: 1.4em;
+		}
+
+		.form-checkbox {
+			border-radius: 0.25rem;
+		}
+
+		.form-radio {
+			border-radius: 50%;
+		}
+
+		.form-checkbox:checked {
+			background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M5.707 7.293a1 1 0 0 0-1.414 1.414l2 2a1 1 0 0 0 1.414 0l4-4a1 1 0 0 0-1.414-1.414L7 8.586 5.707 7.293z'/%3e%3c/svg%3e");
+			border-color: transparent;
+			background-color: currentColor;
+			background-size: 100% 100%;
+			background-position: center;
+			background-repeat: no-repeat;
+		}
+		
+		.form-radio:checked {
+			background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3e%3ccircle cx='8' cy='8' r='3'/%3e%3c/svg%3e");
+			border-color: transparent;
+			background-color: currentColor;
+			background-size: 100% 100%;
+			background-position: center;
+			background-repeat: no-repeat;
+		}
+
+        .hide {
+            display: none;
+            }
+	</style>
+
+</head>
+
+<!-- partial:index.partial.html -->
+<body class="antialiased sans-serif bg-gray-100 " style="background: #edf2f7;">
+		<div class="max-w-3xl mx-auto px-4 py-10">
+
+			
+
+				<!-- Top Navigation -->
+				<div class="border-b-2 py-4">
+					<div class="flex flex-col md:flex-row md:items-center md:justify-between">
+						<div class="flex-1">
+								<div class="text-xl font-bold text-gray-700 leading-tight">openpilot navigation</div>
+						</div>
+
+						<div class="flex items-center md:w-64">
+							<div class="w-full bg-white rounded-full mr-2">
+							</div>
+						</div>
+					</div>
+				</div>
+				<!-- /Top Navigation -->
+
+				<!-- Step Content -->
+				<div class="py-10">	
+                        <form method="POST" id="navigation" class="navigation" autocomplete="off">
+						<div class="mb-5">
+							<label for="route" class="font-bold mb-1 text-gray-700 block">Enter Address</label>
+							<div class="text-gray-600 mt-2 mb-4">
+								Search for an address in the search box, and the coordinates will be parsed and used to generate a route.
+							</div>
+							<div class="relative">
+                                <input type="text" name="address" 
+								class="w-full px-4 py-3 rounded-lg shadow-sm focus:outline-none focus:shadow-outline text-gray-600 font-medium"
+								placeholder="Start typing your address, e.g. 123 Main..." autocomplete="address-line1" id="mapbox-autofill" value="" minlength="30">
+                                <div id="manual-entry" class="w180 mt6 link txt-ms border-b color-gray color-black-on-hover">
+                                    Enter an address manually
+                                </div>
+                            </div>
+                            <div class="secondary-inputs hide">
+                                <label class="txt-s txt-bold color-gray mb3">Address Line 2</label>
+                                <input name="address2" class="input mb12" placeholder="Apartment, suite, unit, building, floor, etc." autocomplete="address-line2">
+                                <label class="txt-s txt-bold color-gray mb3">City</label>
+                                <input name="city" class="input mb12" placeholder="City" autocomplete="address-level2">
+                                <label class="txt-s txt-bold color-gray mb3">State / Region</label>
+                                <input name="state" class="input mb12" placeholder="State / Region" autocomplete="address-level1">
+                                <label class="txt-s txt-bold color-gray mb3">ZIP / Postcode</label>
+                                <input name="zip" class="input" placeholder="ZIP / Postcode" autocomplete="postal-code">
+                                </div>
+                        </div>
+                            <div class="col col--auto-mm">
+                                <!-- Visual confirmation map -->
+                                <div id="minimap-container" class="none h240 w360 relative mt18 mb-2"></div>
+						</div>
+                        <h2 class="mt-5 text-2xl text-gray-800 text-center font-bold">OR</h2>
+                        <h2 class="text-sm mb-5 text-gray-800 text-center">(only do one or the other, otherwise URL will take precedence)</h2>
+                        <div class="mb-5">
+							<label for="profession" class="font-bold mb-1 text-gray-700 block">Apple/Google Maps URL</label>
+                            <div class="text-gray-600 mt-2 mb-4">
+                                Paste your Apple or Google Maps URL here. The Google Maps URL MUST contain the coordinates, meaning you must first open the link in your browser before you can paste it in here. The coordinates will be parsed and used to generate a route.
+                            </div>
+							<input type="text" name="url" id="url"
+								class="w-full px-4 py-3 rounded-lg shadow-sm focus:outline-none focus:shadow-outline text-gray-600 font-medium"
+								placeholder="e.g. https://maps.apple.com/?address=633%20W%20Fifth%20St,%20Unit%20980,%20Los%20Angeles,%20CA%20%2090071,%20United%20States&auid=932511734307343330&ll=34.051074,-118.254422&lsp=9902&q=US%20Bank%20Tower" value="" minlength="60">
+						</div>
+                        <div class="mb-5 text-right submit-btns">
+                            <button type="submit"
+							class="mx-auto inline-flex items-center text-center px-4 py-2 font-semibold leading-6 text-sm shadow rounded-md text-white bg-indigo-500 hover:bg-indigo-400 transition ease-in-out duration-150 submitRoute" id="btn-confirm" >Set Route</button>
+                            <button type="button" class="mx-auto inline-flex items-center text-center px-4 py-2 font-semibold leading-6 text-sm shadow rounded-md text-white bg-gray-500 hover:bg-gray-400 transition ease-in-out duration-150" id="btn-reset">
+                                Reset
+                                </button>
+                                <button type="button" class="mx-auto inline-flex items-center text-center px-4 py-2 font-semibold leading-6 text-sm shadow rounded-md text-white bg-gray-500 hover:bg-gray-400 transition ease-in-out duration-150" id="btn-clearnav" onclick="clearNav()">
+                                    Clear Navigation
+                                    </button>
+                        
+                        </div>
+                    </form>
+                    
+		</div>
+
+		</div>
+		<!-- Bottom Navigation -->	
+
+
+<footer class="fixed bottom-0 left-0 right-0 py-5 p-4 bg-white rounded-lg shadow md:flex md:items-center md:justify-between md:p-6 dark:bg-white">
+    <span class="text-sm text-gray-500 sm:text-center dark:text-gray-400">Created by <a href="https://youtube.com/@jacyy" class="hover:underline">Jacy</a>
+    </span>
+    <ul class="flex flex-wrap items-center mt-3 text-sm text-gray-500 dark:text-gray-400 sm:mt-0">
+        <li>
+         <a href="#" class="mr-4 hover:underline md:mr-6">buy me a coffee?</a>
+        </li>
+    </ul>
+</footer>
+<script>
+    const ACCESS_TOKEN = 'YOUR MAPBOX TOKEN HERE';
+
+    let autofillCollection;
+    let minimap;
+    
+    // Form operation functions
+    function showMap() {
+        const el = document.getElementById("minimap-container");
+        el.classList.remove("none");
+    }
+    
+    function hideMap() {
+        const el = document.getElementById("minimap-container");
+        el.classList.add("none");
+    }
+    
+    function expandForm() {
+        document.getElementById("manual-entry").classList.add("hide");
+        document.querySelector(".secondary-inputs").classList.remove("hide");
+        document.querySelector(".submit-btns").classList.remove("hide");
+    }
+    
+    function collapseForm() {
+        document.getElementById("manual-entry").classList.remove("hide");
+        document.querySelector(".secondary-inputs").classList.add("hide");
+        //document.querySelector(".submit-btns").classList.add("hide");
+    }
+    
+    function submitForm() {
+        setTimeout(() => {
+            resetForm();
+        }, 2500);
+    }
+    
+    function resetForm() {
+        const inputs = document.querySelectorAll("input");
+        inputs.forEach(input => input.value = "");
+        collapseForm();
+        autofillCollection.update();
+        minimap.feature = null;
+        document.getElementById("btn-confirm").innerHTML = "Set Route";
+    }
+    
+    // Bind functions to HTML buttons
+    document
+        .getElementById("manual-entry")
+        .addEventListener("click", expandForm);
+    document.getElementById("btn-reset").addEventListener("click", resetForm);
+    
+    // Autofill initialization
+    document.getElementById("search-js").onload = () => {
+        mapboxsearch.config.accessToken = ACCESS_TOKEN;
+    
+        autofillCollection = mapboxsearch.autofill({});
+    
+        minimap = new MapboxAddressMinimap();
+        minimap.canAdjustMarker = true;
+        minimap.satelliteToggle = true;
+        minimap.onSaveMarkerLocation = (lnglat) => {
+            console.log(`Marker moved to ${lnglat}`);
+        };
+        const minimapContainer = document.getElementById("minimap-container");
+        minimapContainer.appendChild(minimap);
+    
+        autofillCollection.addEventListener(
+            "retrieve",
+            async (e) => {
+                expandForm();
+                if (minimap) {
+                    minimap.feature = e.detail.features[0];
+                    showMap();
+                }
+            }
+        );
+    
+        const form = document.querySelector("form");
+        form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const result = await mapboxsearch.confirmAddress(form, {
+                minimap: true,
+                skipConfirmModal: (feature) => ['exact', 'high'].includes(
+                    feature.properties.match_code.confidence
+                )
+            });
+            if (result.type === 'nochange') submitForm();
+        });
+    }
+</script>
+<script>
+    $(document).on({
+        ajaxStart: function(){
+            $('.submitRoute').html('<svg class="animate-spin -ml-1 mr-3 h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"> <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle> <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path> </svg> Processing...');
+        },
+        ajaxStop: function(){
+            $('.submitRoute').html("Set Route");
+        }
+    }); 
+
+    $(document).ready(function () {
+        $("form").submit(function (event) {
+            var formData = $( "form" ).serialize();
+            $.ajax({
+                type: "POST",
+                url: "/parse",
+                data: formData,
+                encode: true,
+                dataType: "json",
+            });
+        
+            event.preventDefault();
+        });
+        });
+
+    function clearNav(){
+        $.ajax({
+            url:"/clear",
+            type: 'GET',
+        })
+        }
+</script>
+<!-- partial -->
+  
+</body>
+</html>
