@@ -108,7 +108,7 @@ class CarState(CarStateBase):
     ret.brake = 0
     ret.brakePressed = cp.vl["TCS13"]["DriverBraking"] != 0
     # brake lights
-    ret.brakeLights = bool(cp.vl["TCS13"]['BrakeLight'] or ret.brakePressed)
+    ret.brakeLights = bool(cp.vl["TCS13"]['BrakeLight'])
     ret.brakeHoldActive = cp.vl["TCS15"]["AVH_LAMP"] == 2  # 0 OFF, 1 ERROR, 2 ACTIVE, 3 READY
     ret.parkingBrake = cp.vl["TCS13"]["PBRAKE_ACT"] == 1
     ret.accFaulted = cp.vl["TCS13"]["ACCEnable"] != 0  # 0 ACC CONTROL ENABLED, 1-3 ACC CONTROL DISABLED
