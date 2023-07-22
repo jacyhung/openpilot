@@ -41,7 +41,7 @@ class LatControlTorque(LatControl):
     if self.use_nn:
       cloudlog.warning("Using NNFF model for lateral torque control")
       self.torque_from_nn = CI.get_ff_nn
-      self.error_downscale = 2.0 # downscale error in curves by up to the reciprocal of this factor
+      self.error_downscale = 0.0 # downscale error in curves by up to the reciprocal of this factor
       self.error_downscale_deadzone = 0.3 # full error response on mostly straight roads
       # error downscaling uses planned lat accel to preemptively downscale error by 1.5s,
       # and is filtered so that downscaling continues for a short time after (~1.5s)
