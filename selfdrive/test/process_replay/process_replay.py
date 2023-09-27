@@ -14,15 +14,15 @@ import capnp
 
 import cereal.messaging as messaging
 from cereal import car
-from cereal.services import service_list
+from cereal.services import SERVICE_LIST
 from cereal.visionipc import VisionIpcServer, get_endpoint_name as vipc_get_endpoint_name
 from openpilot.common.params import Params
+from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.common.timeout import Timeout
 from openpilot.common.realtime import DT_CTRL
 from panda.python import ALTERNATIVE_EXPERIENCE
 from openpilot.selfdrive.car.car_helpers import get_car, interfaces
 from openpilot.selfdrive.manager.process_config import managed_processes
-from openpilot.selfdrive.test.process_replay.helpers import OpenpilotPrefix, DummySocket
 from openpilot.selfdrive.test.process_replay.vision_meta import meta_from_camera_state, available_streams
 from openpilot.selfdrive.test.process_replay.migration import migrate_all
 from openpilot.selfdrive.test.process_replay.capture import ProcessOutputCapture
@@ -33,6 +33,18 @@ NUMPY_TOLERANCE = 1e-7
 PROC_REPLAY_DIR = os.path.dirname(os.path.abspath(__file__))
 FAKEDATA = os.path.join(PROC_REPLAY_DIR, "fakedata/")
 
+class DummySocket:
+  def __init__(self):
+    self.data: List[bytes] = []
+
+  def receive(self, non_blocking: bool = False) -> Optional[bytes]:
+    if non_blocking:
+      return None
+
+    return self.data.pop()
+
+  def send(self, data: bytes):
+    self.data.append(data)
 
 class LauncherWithCapture:
   def __init__(self, capture: ProcessOutputCapture, launcher: Callable):
@@ -352,7 +364,7 @@ def controlsd_rcv_callback(msg, cfg, frame):
 
   socks = [
     s for s in cfg.subs if
-    frame % int(service_list[msg.which()].frequency / service_list[s].frequency) == 0
+    frame % int(SERVICE_LIST[msg.which()].frequency / SERVICE_LIST[s].frequency) == 0
   ]
   if "sendcan" in socks and (frame - 1) < 2000:
     socks.remove("sendcan")
@@ -416,7 +428,7 @@ class FrequencyBasedRcvCallback:
 
     resp_sockets = [
       s for s in cfg.subs
-      if frame % max(1, int(service_list[msg.which()].frequency / service_list[s].frequency)) == 0
+      if frame % max(1, int(SERVICE_LIST[msg.which()].frequency / SERVICE_LIST[s].frequency)) == 0
     ]
     return bool(len(resp_sockets))
 
@@ -460,7 +472,7 @@ CONFIGS = [
       "can", "deviceState", "pandaStates", "peripheralState", "liveCalibration", "driverMonitoringState",
       "longitudinalPlan", "lateralPlan", "liveLocationKalman", "liveParameters", "radarState",
       "modelV2", "driverCameraState", "roadCameraState", "wideRoadCameraState", "managerState",
-      "testJoystick", "liveTorqueParameters"
+      "testJoystick", "liveTorqueParameters", "accelerometer", "gyroscope"
     ],
     subs=["controlsState", "carState", "carControl", "sendcan", "carEvents", "carParams"],
     ignore=["logMonoTime", "valid", "controlsState.startMonoTime", "controlsState.cumLagMs"],
