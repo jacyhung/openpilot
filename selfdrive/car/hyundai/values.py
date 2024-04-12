@@ -304,10 +304,10 @@ class CAR(Platforms):
     HYUNDAI_SONATA.specs,
     flags=HyundaiFlags.MANDO_RADAR | HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.HYBRID,
   )
-  HYUNDAI_SONATA_HEV_2024 = HyundaiPlatformConfig(
+  HYUNDAI_SONATA_HEV_2024 = HyundaiCanFDPlatformConfig(
     [HyundaiCarDocs("Hyundai Sonata Hybrid 2024", "All", car_parts=CarParts.common([CarHarness.hyundai_a]))],
     CarSpecs(mass=1672, wheelbase=2.84, steerRatio=13.27 * 1.15, tireStiffnessFactor=0.65),
-    flags=HyundaiFlags.HYBRID,
+    flags=HyundaiFlags.HYBRID | HyundaiFlags.CANFD_NO_RADAR_DISABLE,
   )
   HYUNDAI_IONIQ_5 = HyundaiCanFDPlatformConfig(
     [
