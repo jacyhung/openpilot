@@ -127,15 +127,23 @@ class SelfdriveD:
     if HARDWARE.get_device_type() == 'mici':
       self.startup_event = None
     if not car_recognized:
-      self.startup_event = EventName.startupNoCar
+      if self.CP.dashcamOnly:
+        # For dashcam mode (mock car), treat as recognized to avoid "unavailable" warning
+        self.startup_event = EventName.startupNoControl
+      else:
+        self.startup_event = EventName.startupNoCar
     elif car_recognized and self.CP.passive:
       self.startup_event = EventName.startupNoControl
     elif self.CP.secOcRequired and not self.CP.secOcKeyAvailable:
       self.startup_event = EventName.startupNoSecOcKey
 
     if not car_recognized:
-      self.events.add(EventName.carUnrecognized, static=True)
-      set_offroad_alert("Offroad_CarUnrecognized", True)
+      if self.CP.dashcamOnly:
+        # For dashcam mode, show dashcam mode event instead of unrecognized
+        self.events.add(EventName.dashcamMode, static=True)
+      else:
+        self.events.add(EventName.carUnrecognized, static=True)
+        set_offroad_alert("Offroad_CarUnrecognized", True)
     elif self.CP.passive:
       self.events.add(EventName.dashcamMode, static=True)
 

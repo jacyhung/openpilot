@@ -422,8 +422,8 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
 
   EventName.startupNoControl: {
-    ET.PERMANENT: StartupAlert("Dashcam mode"),
-    ET.NO_ENTRY: NoEntryAlert("Dashcam mode"),
+    ET.PERMANENT: EmptyAlert,
+    ET.NO_ENTRY: EmptyAlert,
   },
 
   EventName.startupNoCar: {
@@ -437,8 +437,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
 
   EventName.dashcamMode: {
-    ET.PERMANENT: NormalPermanentAlert("Dashcam Mode",
-                                       priority=Priority.LOWEST),
+    ET.PERMANENT: EmptyAlert,
   },
 
   EventName.invalidLkasSetting: {

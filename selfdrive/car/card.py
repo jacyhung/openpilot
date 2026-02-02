@@ -82,12 +82,13 @@ class Car:
     is_release = self.params.get_bool("IsReleaseBranch")
 
     if CI is None:
-      # wait for one pandaState and one CAN packet
-      print("Waiting for CAN messages...")
-      while True:
-        can = messaging.recv_one_retry(self.can_sock)
-        if len(can.can) > 0:
-          break
+      # wait for one pandaState and one CAN packet (skip for dashcam mode)
+      if os.environ.get('DASHCAM_MODE', '0') != '1':
+        print("Waiting for CAN messages...")
+        while True:
+          can = messaging.recv_one_retry(self.can_sock)
+          if len(can.can) > 0:
+            break
 
       alpha_long_allowed = self.params.get_bool("AlphaLongitudinalEnabled")
       num_pandas = len(messaging.recv_one_retry(self.sm.sock['pandaStates']).pandaStates)
