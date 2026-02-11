@@ -104,7 +104,7 @@ class UploadItem:
   retry_count: int = 0
   current: bool = False
   progress: float = 0
-  allow_cellular: bool = False
+  allow_cellular: bool = True
   priority: int = DEFAULT_UPLOAD_PRIORITY
 
   @classmethod
@@ -260,14 +260,7 @@ def retry_upload(tid: int, end_event: threading.Event, increase_count: bool = Tr
 
 
 def cb(sm, item, tid, end_event: threading.Event, sz: int, cur: int) -> None:
-  # Abort transfer if connection changed to metered after starting upload
-  # or if athenad is shutting down to re-connect the websocket
-  if not item.allow_cellular:
-    if (time.monotonic() - sm.recv_time['deviceState']) > DEVICE_STATE_UPDATE_INTERVAL:
-      sm.update(0)
-      if sm['deviceState'].networkMetered:
-        raise AbortTransferException
-
+  # Abort transfer if athenad is shutting down to re-connect the websocket
   if end_event.is_set():
     raise AbortTransferException
 
@@ -294,13 +287,9 @@ def upload_handler(end_event: threading.Event) -> None:
         cloudlog.event("athena.upload_handler.expired", item=item, error=True)
         continue
 
-      # Check if uploading over metered connection is allowed
       sm.update(0)
       metered = sm['deviceState'].networkMetered
       network_type = sm['deviceState'].networkType.raw
-      if metered and (not item.allow_cellular):
-        retry_upload(tid, end_event, False)
-        continue
 
       try:
         fn = item.path

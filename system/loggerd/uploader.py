@@ -86,6 +86,14 @@ class Uploader:
 
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
+    # Camera files to upload (lower number = higher priority)
+    self.camera_priority = {
+      "ecamera.hevc": 10,
+      "fcamera.hevc": 11,
+      "dcamera.hevc": 12,
+      "rlog": 5,
+      "rlog.zst": 5,
+    }
 
   def list_upload_files(self, metered: bool) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
@@ -120,13 +128,24 @@ class Uploader:
   def next_file_to_upload(self, metered: bool) -> tuple[str, str, str] | None:
     upload_files = list(self.list_upload_files(metered))
 
+    # 1. Immediate folders (crash, boot) first
     for name, key, fn in upload_files:
       if any(f in fn for f in self.immediate_folders):
         return name, key, fn
 
+    # 2. High priority files (qlog, qcamera)
     for name, key, fn in upload_files:
       if name in self.immediate_priority:
         return name, key, fn
+
+    # 3. Camera and other files (ecamera, fcamera, dcamera, rlog)
+    for name, key, fn in upload_files:
+      if name in self.camera_priority:
+        return name, key, fn
+
+    # 4. Any remaining files
+    for name, key, fn in upload_files:
+      return name, key, fn
 
     return None
 
@@ -248,9 +267,10 @@ def main(exit_event: threading.Event | None = None) -> None:
         time.sleep(60 if offroad else 5)
       continue
 
+    # Always upload regardless of onroad/offroad state
     success = uploader.step(sm['deviceState'].networkType.raw, sm['deviceState'].networkMetered)
     if success is None:
-      backoff = 60 if offroad else 5
+      backoff = 5
     elif success:
       backoff = 0.1
     else:

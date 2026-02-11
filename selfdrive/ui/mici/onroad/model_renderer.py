@@ -137,10 +137,9 @@ class ModelRenderer(Widget):
         self._update_leads(radar_state, path_x_array)
       self._transform_dirty = False
 
-    # Draw elements (hide when disengaged)
-    if ui_state.status != UIStatus.DISENGAGED:
-      self._draw_lane_lines()
-      self._draw_path(sm)
+    # Draw elements
+    self._draw_lane_lines()
+    self._draw_path(sm)
 
     # if render_lead_indicator and radar_state:
     #   self._draw_lead_indicator()

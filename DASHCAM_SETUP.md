@@ -24,6 +24,21 @@ The following modifications have been made to enable dashcam mode:
 - Modified lane visibility to always show lane lines when in passive mode
 - Changed `hudControl.lanesVisible = CC.enabled` to `hudControl.lanesVisible = CC.enabled or self.CP.passive`
 
+### 5. events.py
+- Suppressed "Dashcam Mode" alert text by using `EmptyAlert` for `startupNoControl` and `dashcamMode` events
+- UI shows clean camera view without status banners
+
+### 6. mici/onroad/model_renderer.py
+- Removed the `DISENGAGED` gate that hid lane lines and path when not engaged
+- Lane lines and path now always render regardless of engagement state
+
+### 7. system/loggerd/uploader.py
+- Added camera file priorities (`ecamera.hevc`, `fcamera.hevc`, `dcamera.hevc`, `rlog`) to upload queue
+- Modified `next_file_to_upload` to return ALL file types, not just qlogs/qcamera
+- Upload priority: boot/crash > qlog/qcamera > rlog > ecamera > fcamera > dcamera > remaining
+- Reduced idle backoff from 60s (offroad) to 5s so uploads happen promptly while onroad
+- Uploads now happen on cellular/LTE (no metered filtering) and while onroad
+
 ## How to Use
 
 ### Step 1: Set Environment Variable
