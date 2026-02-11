@@ -1,6 +1,6 @@
 [project]
 name = "openpilot"
-requires-python = ">= 3.11, < 3.13"
+requires-python = ">= 3.12.3, < 3.13"
 license = {text = "MIT License"}
 version = "0.1.0"
 description = "an open source driver assistance system"
@@ -32,9 +32,6 @@ dependencies = [
   # with the latest release
   "pyopenssl < 24.3.0",
   "pyaudio",
-
-  # ubloxd (TODO: just use struct)
-  "kaitaistruct",
 
   # panda
   "libusb1",
@@ -77,7 +74,6 @@ dependencies = [
 [project.optional-dependencies]
 docs = [
   "Jinja2",
-  "natsort",
   "mkdocs",
 ]
 
@@ -93,7 +89,6 @@ testing = [
   "pytest-timeout",
   "pytest-asyncio",
   "pytest-mock",
-  "pytest-repeat",
   "ruff",
   "codespell",
   "pre-commit-hooks",
@@ -101,15 +96,12 @@ testing = [
 
 dev = [
   "av",
-  "azure-identity",
-  "azure-storage-blob",
   "dictdiffer",
   "matplotlib",
   "opencv-python-headless",
   "parameterized >=0.8, <0.9",
   "pyautogui",
   "pywinctl",
-  "tabulate",
 ]
 
 tools = [
