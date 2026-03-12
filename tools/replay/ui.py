@@ -160,9 +160,12 @@ def ui_thread(addr):
 
     camera = DEVICE_CAMERAS[("tici", str(sm['roadCameraState'].sensor))]
 
-    imgff = np.frombuffer(yuv_img_raw.data, dtype=np.uint8).reshape((len(yuv_img_raw.data) // vipc_client.stride, vipc_client.stride))
-    num_px = vipc_client.width * vipc_client.height
-    rgb = cv2.cvtColor(imgff[: vipc_client.height * 3 // 2, : vipc_client.width], cv2.COLOR_YUV2RGB_NV12)
+    # Use received buffer dimensions (full HEVC can have stride != buffer_len/rows due to VENUS padding)
+    h, w, stride = yuv_img_raw.height, yuv_img_raw.width, yuv_img_raw.stride
+    nv12_size = h * 3 // 2 * stride
+    imgff = np.frombuffer(yuv_img_raw.data, dtype=np.uint8, count=nv12_size).reshape((h * 3 // 2, stride))
+    num_px = w * h
+    rgb = cv2.cvtColor(imgff[: h * 3 // 2, : w], cv2.COLOR_YUV2RGB_NV12)
 
     qcam = "QCAM" in os.environ
     bb_scale = (528 if qcam else camera.fcam.width) / 640.0
@@ -215,7 +218,7 @@ def ui_thread(addr):
     # Update camera texture from numpy array
     img_rgba = cv2.cvtColor(img, cv2.COLOR_RGB2RGBA)
     rl.update_texture(camera_texture, rl.ffi.cast("void *", img_rgba.ctypes.data))
-    rl.draw_texture(camera_texture, 0, 0, rl.WHITE)
+    rl.draw_texture(camera_texture, 0, 0, rl.WHITE)  # noqa: TID251
 
     # display alerts
     rl.draw_text_ex(font, sm['selfdriveState'].alertText1, rl.Vector2(180, 150), 30, 0, rl.RED)
@@ -224,15 +227,15 @@ def ui_thread(addr):
     # draw plots (texture is reused internally)
     plot_texture = draw_plots(plot_arr)
     if hor_mode:
-      rl.draw_texture(plot_texture, 640 + 384, 0, rl.WHITE)
+      rl.draw_texture(plot_texture, 640 + 384, 0, rl.WHITE)  # noqa: TID251
     else:
-      rl.draw_texture(plot_texture, 0, 600, rl.WHITE)
+      rl.draw_texture(plot_texture, 0, 600, rl.WHITE)  # noqa: TID251
 
     # Convert lid_overlay to RGBA and update top_down texture
     # lid_overlay is (384, 960), need to transpose to (960, 384) for row-major RGBA buffer
     lid_rgba = palette[lid_overlay.T]
     rl.update_texture(top_down_texture, rl.ffi.cast("void *", np.ascontiguousarray(lid_rgba).ctypes.data))
-    rl.draw_texture(top_down_texture, 640, 0, rl.WHITE)
+    rl.draw_texture(top_down_texture, 640, 0, rl.WHITE)  # noqa: TID251
 
     SPACING = 25
     lines = [
