@@ -1,3 +1,4 @@
+import os
 import colorsys
 import numpy as np
 import pyray as rl
@@ -137,8 +138,8 @@ class ModelRenderer(Widget):
         self._update_leads(radar_state, path_x_array)
       self._transform_dirty = False
 
-    # Draw elements (hide when disengaged)
-    if ui_state.status != UIStatus.DISENGAGED:
+    # Draw elements — always draw in dashcam mode, otherwise only when not disengaged
+    if os.environ.get("STARTED") is not None or ui_state.status != UIStatus.DISENGAGED:
       self._draw_lane_lines()
       self._draw_path(sm)
 
