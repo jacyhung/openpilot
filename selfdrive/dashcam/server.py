@@ -11,10 +11,11 @@ a MPEG-TS container with HEVC inside, so it gets the same treatment.
 """
 
 import asyncio
+import io
 import os
 import re
 import time
-from datetime import datetime
+import wave
 from pathlib import Path
 
 from aiohttp import web
@@ -74,9 +75,6 @@ def _scan_routes() -> list[dict]:
     for r in routes.values():
         r['segments'].sort()
         r['seg_count'] = len(r['segments'])
-        dt = datetime.fromtimestamp(r['mtime'])
-        r['date'] = dt.strftime('%b %d, %Y')
-        r['time'] = dt.strftime('%I:%M %p')
 
     _cache = routes
     _cache_time = now
@@ -116,8 +114,7 @@ async def handle_api_routes(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
     routes = await loop.run_in_executor(None, _scan_routes)
     return web.json_response([
-        {'id': r['id'], 'date': r['date'], 'time': r['time'],
-         'mtime': r['mtime'], 'seg_count': r['seg_count']}
+        {'id': r['id'], 'mtime': r['mtime'], 'seg_count': r['seg_count']}
         for r in routes
     ])
 
@@ -157,7 +154,14 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     cmd += [
         '-i', str(video_path),
         '-c:v', 'copy',
-        '-an',
+    ]
+    # Pass through embedded audio for qcamera.ts (muxed in when RecordAudio is enabled).
+    # Raw .hevc files have no audio stream, so this is a no-op for f/d/e cameras.
+    if camera == 'q':
+        cmd += ['-c:a', 'copy']
+    else:
+        cmd += ['-an']
+    cmd += [
         '-f', 'mp4',
         '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
         'pipe:1',
@@ -192,6 +196,97 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
         await proc.wait()
 
     return response
+
+
+# ---------------------------------------------------------------------------
+# Audio endpoint — extract rawAudioData PCM from rlog.zst and serve as WAV
+# ---------------------------------------------------------------------------
+
+def _rlog_path(seg_dir: Path) -> Path | None:
+    """Return path to rlog file in segment directory, or None."""
+    for name in ('rlog.zst', 'rlog'):
+        p = seg_dir / name
+        if p.exists():
+            return p
+    return None
+
+
+def _extract_audio_wav(rlog_path: Path) -> bytes | None:
+    """Read rlog(.zst), extract rawAudioData messages, return WAV bytes or None."""
+    try:
+        import zstandard as zstd  # available in openpilot venv
+        import capnp  # noqa: F401
+        from cereal import log as capnp_log
+    except ImportError:
+        return None
+
+    try:
+        raw = rlog_path.read_bytes()
+        # Decompress if zstd
+        if raw[:4] == b'\x28\xB5\x2F\xFD':
+            dctx = zstd.ZstdDecompressor()
+            raw = dctx.decompress(raw, max_output_size=256 * 1024 * 1024)
+
+        events = capnp_log.Event.read_multiple_bytes(raw)
+        chunks: list[bytes] = []
+        sample_rate = 16000
+        for e in events:
+            try:
+                if e.which() == 'rawAudioData':
+                    rad = e.rawAudioData
+                    chunks.append(bytes(rad.data))
+                    sample_rate = rad.sampleRate
+            except Exception:
+                continue
+    except Exception:
+        return None
+
+    if not chunks:
+        return None
+
+    pcm = b''.join(chunks)
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)        # int16
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+async def handle_audio(request: web.Request) -> web.Response:
+    """Stream WAV audio extracted from the segment's rlog.zst."""
+    route_id = request.match_info['route_id']
+    try:
+        segment = int(request.match_info['segment'])
+    except (ValueError, KeyError):
+        raise web.HTTPBadRequest()
+    if not ROUTE_ID_PATTERN.match(route_id):
+        raise web.HTTPBadRequest()
+    if not (0 <= segment <= 99999):
+        raise web.HTTPBadRequest()
+
+    realdata_resolved = REALDATA.resolve()
+    seg_dir = (REALDATA / f"{route_id}--{segment}").resolve()
+    if not str(seg_dir).startswith(str(realdata_resolved) + os.sep):
+        raise web.HTTPForbidden()
+    if not seg_dir.is_dir():
+        raise web.HTTPNotFound()
+
+    rlog = _rlog_path(seg_dir)
+    if not rlog:
+        raise web.HTTPNotFound()
+
+    loop = asyncio.get_event_loop()
+    wav_bytes = await loop.run_in_executor(None, _extract_audio_wav, rlog)
+    if not wav_bytes:
+        raise web.HTTPNotFound()
+
+    return web.Response(
+        body=wav_bytes,
+        content_type='audio/wav',
+        headers={'Cache-Control': 'no-cache'},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +383,7 @@ video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
       <!-- Video -->
       <div id="video-wrap">
         <video id="video" playsinline controls preload="auto" onended="onVideoEnded()"></video>
+        <audio id="audio-sync" preload="auto" style="display:none;"></audio>
         <div id="video-overlay">
           <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.069A1 1 0 0121 8.882v6.236a1 1 0 01-1.447.894L15 14M4 8h8a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4a2 2 0 012-2z"/>
@@ -331,11 +427,21 @@ video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
 
 <script>
 const CAMERAS = [
-  {key:'q', label:'Road (360p)'},
+  {key:'q', label:'Road (360p)', hasAudio: true},
   {key:'f', label:'Front'},
   {key:'d', label:'Driver'},
   {key:'e', label:'Wide'},
 ];
+
+// ── Timezone helpers (browser-local timezone) ──────────────────────────────
+function formatDate(mtime) {
+  const dt = new Date(mtime * 1000);
+  return dt.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
+}
+function formatTime(mtime) {
+  const dt = new Date(mtime * 1000);
+  return dt.toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'});
+}
 
 let allRoutes = [];
 let currentRoute = null;
@@ -373,11 +479,13 @@ function renderRouteList(routes) {
   }
   el.innerHTML = routes.map(r => {
     const sel = currentRoute && currentRoute.id === r.id ? ' selected' : '';
+    const d = formatDate(r.mtime);
+    const t = formatTime(r.mtime);
     return `<div class="route-card${sel}" onclick="selectRoute('${r.id}')">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
         <div style="min-width:0;">
-          <div class="rc-date">${r.date}</div>
-          <div class="rc-time">${r.time}</div>
+          <div class="rc-date">${d}</div>
+          <div class="rc-time">${t}</div>
           <div class="rc-id">${r.id}</div>
         </div>
         <div class="rc-badge" style="flex-shrink:0;text-align:right;">
@@ -398,7 +506,7 @@ function updateCount(shown, total) {
 function onSearch(q) {
   q = q.toLowerCase().trim();
   const filtered = q
-    ? allRoutes.filter(r => r.id.includes(q) || r.date.toLowerCase().includes(q) || r.time.toLowerCase().includes(q))
+    ? allRoutes.filter(r => r.id.includes(q) || formatDate(r.mtime).toLowerCase().includes(q) || formatTime(r.mtime).toLowerCase().includes(q))
     : allRoutes;
   renderRouteList(filtered);
   updateCount(filtered.length, allRoutes.length);
@@ -426,7 +534,7 @@ async function selectRoute(routeId) {
   document.getElementById('controls').style.flexDirection = 'column';
 
   // metadata
-  document.getElementById('route-title').textContent = `${route.date} · ${route.time}`;
+  document.getElementById('route-title').textContent = `${formatDate(route.mtime)} · ${formatTime(route.mtime)}`;
   document.getElementById('route-sub').textContent = route.id;
 
   // camera tabs
@@ -492,10 +600,24 @@ function playSegment(idx) {
   document.getElementById('prev-btn').disabled = idx <= 0;
   document.getElementById('next-btn').disabled = idx >= currentRoute.segments.length - 1;
 
+  // Stop external audio from the previous segment
+  const audio = document.getElementById('audio-sync');
+  audio.pause();
+  audio.src = '';
+  audio.removeAttribute('src');
+
   // Load and play video — /stream endpoint pipes ffmpeg→fMP4
   const video = document.getElementById('video');
   video.src = `/stream/${currentRoute.id}/${seg}/${currentCam}`;
   video.load();
+
+  // For f/d/e cameras: load separate audio from rlog if available.
+  // (q camera has audio muxed directly into the MP4 stream.)
+  const camInfo = CAMERAS.find(c => c.key === currentCam);
+  if (!camInfo?.hasAudio) {
+    audio.src = `/audio/${currentRoute.id}/${seg}`;
+  }
+
   video.play().catch(() => {});
 }
 
@@ -504,6 +626,32 @@ function onVideoEnded() {
     stepSegment(1);
   }
 }
+
+// ── Audio sync ─────────────────────────────────────────────────────────────
+(function setupAudioSync() {
+  const video = document.getElementById('video');
+  const audio = document.getElementById('audio-sync');
+
+  function syncAudio() {
+    if (!audio.src || audio.src === window.location.href) return;
+    const diff = Math.abs(audio.currentTime - video.currentTime);
+    if (diff > 0.3) audio.currentTime = video.currentTime;
+  }
+
+  video.addEventListener('play', () => {
+    if (audio.src && audio.src !== window.location.href) {
+      audio.currentTime = video.currentTime;
+      audio.play().catch(() => {});
+    }
+  });
+  video.addEventListener('pause', () => { audio.pause(); });
+  video.addEventListener('seeked', () => {
+    if (audio.src && audio.src !== window.location.href) {
+      audio.currentTime = video.currentTime;
+    }
+  });
+  video.addEventListener('timeupdate', syncAudio);
+})();
 
 loadRoutes();
 </script>
@@ -525,6 +673,7 @@ def main() -> None:
     app.router.add_get('/api/route/{route_id}',              handle_api_route)
     app.router.add_get('/stream/{route_id}/{segment}',       handle_stream)
     app.router.add_get('/stream/{route_id}/{segment}/{camera}', handle_stream)
+    app.router.add_get('/audio/{route_id}/{segment}',         handle_audio)
 
     web.run_app(app, host='0.0.0.0', port=PORT, access_log=None)
 
