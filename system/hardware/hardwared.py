@@ -238,6 +238,10 @@ def hardware_thread(end_event, hw_queue) -> None:
         onroad_conditions["ignition"] = False
         cloudlog.error("panda timed out onroad")
 
+    # Force ignition when STARTED env var is set (dashcam mode)
+    if os.environ.get("STARTED") is not None:
+      onroad_conditions["ignition"] = True
+
     # Run at 2Hz, plus either edge of ignition
     ign_edge = (started_ts is not None) != all(onroad_conditions.values())
     if (sm.frame % round(SERVICE_LIST['pandaStates'].frequency * DT_HW) != 0) and not ign_edge:
@@ -332,7 +336,9 @@ def hardware_thread(end_event, hw_queue) -> None:
     # Handle offroad/onroad transition
     should_start = all(onroad_conditions.values())
     if started_ts is None:
-      should_start = should_start and all(startup_conditions.values())
+      # Skip startup conditions in dashcam mode (STARTED env var)
+      if os.environ.get("STARTED") is None:
+        should_start = should_start and all(startup_conditions.values())
 
     if should_start != should_start_prev or (count == 0):
       params.put_bool("IsEngaged", False)

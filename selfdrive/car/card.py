@@ -82,27 +82,39 @@ class Car:
     is_release = self.params.get_bool("IsReleaseBranch")
 
     if CI is None:
-      # wait for one pandaState and one CAN packet
-      print("Waiting for CAN messages...")
-      while True:
-        can = messaging.recv_one_retry(self.can_sock)
-        if len(can.can) > 0:
-          break
+      fixed_fingerprint = os.environ.get('FINGERPRINT', '')
 
-      alpha_long_allowed = self.params.get_bool("AlphaLongitudinalEnabled")
+      if fixed_fingerprint == 'MOCK':
+        # Dashcam mode: skip CAN wait and fingerprinting, use mock car directly
+        from opendbc.car import gen_empty_fingerprint
+        CarInterface = interfaces['MOCK']
+        CP = CarInterface.get_params('MOCK', gen_empty_fingerprint(), [], False, is_release, docs=False)
+        self.CI = CarInterface(CP)
+        self.RI = CarInterface.RadarInterface(CP)
+        self.CP = CP
+        self.params.put_bool("FirmwareQueryDone", True)
+      else:
+        # wait for one pandaState and one CAN packet
+        print("Waiting for CAN messages...")
+        while True:
+          can = messaging.recv_one_retry(self.can_sock)
+          if len(can.can) > 0:
+            break
 
-      cached_params = None
-      cached_params_raw = self.params.get("CarParamsCache")
-      if cached_params_raw is not None:
-        with car.CarParams.from_bytes(cached_params_raw) as _cached_params:
-          cached_params = _cached_params
+        alpha_long_allowed = self.params.get_bool("AlphaLongitudinalEnabled")
 
-      self.CI = get_car(*self.can_callbacks, obd_callback(self.params), alpha_long_allowed, is_release, cached_params)
-      self.RI = interfaces[self.CI.CP.carFingerprint].RadarInterface(self.CI.CP)
-      self.CP = self.CI.CP
+        cached_params = None
+        cached_params_raw = self.params.get("CarParamsCache")
+        if cached_params_raw is not None:
+          with car.CarParams.from_bytes(cached_params_raw) as _cached_params:
+            cached_params = _cached_params
 
-      # continue onto next fingerprinting step in pandad
-      self.params.put_bool("FirmwareQueryDone", True)
+        self.CI = get_car(*self.can_callbacks, obd_callback(self.params), alpha_long_allowed, is_release, cached_params)
+        self.RI = interfaces[self.CI.CP.carFingerprint].RadarInterface(self.CI.CP)
+        self.CP = self.CI.CP
+
+        # continue onto next fingerprinting step in pandad
+        self.params.put_bool("FirmwareQueryDone", True)
     else:
       self.CI, self.CP = CI, CI.CP
       self.RI = RI

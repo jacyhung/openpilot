@@ -95,6 +95,7 @@ class SelfdriveD:
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
 
     car_recognized = self.CP.brand != 'mock'
+    dashcam_mode = os.environ.get('FINGERPRINT') == 'MOCK'
 
     # cleanup old params
     if not self.CP.alphaLongitudinalAvailable:
@@ -127,14 +128,20 @@ class SelfdriveD:
     self.startup_event = EventName.startup if build_metadata.openpilot.comma_remote and build_metadata.tested_channel else EventName.startupMaster
     if HARDWARE.get_device_type() == 'mici':
       self.startup_event = None
-    if not car_recognized:
+    if dashcam_mode:
+      # Clean dashcam mode: no error alerts
+      self.startup_event = None
+    elif not car_recognized:
       self.startup_event = EventName.startupNoCar
     elif car_recognized and self.CP.passive:
       self.startup_event = EventName.startupNoControl
     elif self.CP.secOcRequired and not self.CP.secOcKeyAvailable:
       self.startup_event = EventName.startupNoSecOcKey
 
-    if not car_recognized:
+    if dashcam_mode:
+      # Dashcam mode: suppress error alerts, just show clean UI
+      pass
+    elif not car_recognized:
       self.events.add(EventName.carUnrecognized, static=True)
       set_offroad_alert("Offroad_CarUnrecognized", True)
     elif self.CP.passive:

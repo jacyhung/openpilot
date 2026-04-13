@@ -20,3 +20,8 @@ if [ -z "$AGNOS_VERSION" ]; then
 fi
 
 export STAGING_ROOT="/data/safe_staging"
+
+# Dashcam mode: force onroad immediately, skip fingerprinting
+export STARTED=1
+export FINGERPRINT="MOCK"
+export SKIP_FW_QUERY=1
