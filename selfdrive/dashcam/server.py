@@ -9,6 +9,7 @@ byte-range support so browsers and iOS can scrub freely.
 """
 
 import asyncio
+import collections
 import io
 import os
 import re
@@ -21,6 +22,12 @@ from aiohttp import web
 
 REALDATA = Path(os.environ.get("DASHCAM_DATA_DIR", "/data/media/0/realdata"))
 PORT = int(os.environ.get("DASHCAM_PORT", "8082"))
+
+# LRU cache for remuxed MP4 bytes — avoids re-running ffmpeg on every Range
+# sub-request. Keyed on (route_id, segment, camera). ~10 entries ≈ 50-150 MB.
+MAX_MP4_CACHE = 10
+_mp4_cache: collections.OrderedDict[tuple[str, int, str], bytes] = collections.OrderedDict()
+_mp4_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
 
 SEGMENT_PATTERN = re.compile(r'^([0-9a-f]+--[0-9a-f]+)--(\d+)$')
 ROUTE_ID_PATTERN = re.compile(r'^[0-9a-f]+--[0-9a-f]+$')
@@ -133,19 +140,11 @@ async def handle_api_route(request: web.Request) -> web.Response:
 async def handle_stream(request: web.Request) -> web.Response:
     """Remux HEVC/H.264 → regular MP4 via ffmpeg, serve with full Range support.
 
-    Key design decisions:
-    * Write to a temp file, not a pipe.  -movflags +faststart needs a seekable
-      output to rewrite the moov atom to the front of the file.  A pipe is not
-      seekable, so faststart is impossible with pipe:1.
-    * Use +faststart (moov at front), NOT fragmented / empty_moov MP4.
-      Fragmented MP4 with empty_moov stores codec parameters inside moof
-      fragments, not in the initial moov box.  iOS Safari/Chrome see an
-      essentially empty moov and refuse to play the video (slash icon).
-      With faststart, iOS reads the moov, sees the full codec descriptor, and
-      plays immediately.
-    * Serve with Accept-Ranges + correct 206 responses so the browser can seek
-      by byte offset → the moov chunk table maps bytes to timestamps correctly.
-    The remux is a copy-only pass and finishes in well under a second.
+    The remuxed MP4 is cached in memory (LRU, up to MAX_MP4_CACHE entries) so
+    that subsequent Range sub-requests (including the iOS bytes=0-1 probe) all
+    serve from the *same* binary.  Without caching, every request would re-run
+    ffmpeg, producing a different file each time — the moov from request #1
+    wouldn't match the mdat from request #2, breaking seeking and iOS playback.
     """
     route_id = request.match_info['route_id']
     camera   = request.match_info.get('camera', 'q')
@@ -157,55 +156,75 @@ async def handle_stream(request: web.Request) -> web.Response:
     video_path = _validate_video_path(route_id, segment, camera)
     _, fmt = CAMERAS[camera]
 
-    # Use a temp file so ffmpeg can write a proper moov+mdat layout with faststart
-    tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
-    os.close(tmp_fd)
-    try:
-        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
-        if fmt:
-            cmd += ['-f', fmt]
-        cmd += ['-i', str(video_path), '-c:v', 'copy']
-        if fmt == 'hevc':
-            # iOS requires the hvc1 codec box tag; ffmpeg defaults to hev1
-            cmd += ['-tag:v', 'hvc1']
-        if camera == 'q':
-            cmd += ['-c:a', 'copy']   # pass through embedded audio if present
+    cache_key = (route_id, segment, camera)
+
+    # Acquire a per-key lock so concurrent Range requests wait for a single
+    # ffmpeg run instead of each spawning their own.
+    if cache_key not in _mp4_locks:
+        _mp4_locks[cache_key] = asyncio.Lock()
+    lock = _mp4_locks[cache_key]
+
+    async with lock:
+        if cache_key in _mp4_cache:
+            # Move to end (most-recently used)
+            _mp4_cache.move_to_end(cache_key)
+            mp4_bytes = _mp4_cache[cache_key]
         else:
-            cmd += ['-an']
-        cmd += ['-movflags', '+faststart', tmpname]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        try:
-            await asyncio.wait_for(proc.communicate(), timeout=120.0)
-        except asyncio.TimeoutError:
+            # Run ffmpeg once; cache the result
+            tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
+            os.close(tmp_fd)
             try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            raise web.HTTPGatewayTimeout()
+                cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
+                if fmt:
+                    cmd += ['-f', fmt]
+                cmd += ['-i', str(video_path), '-c:v', 'copy']
+                if fmt == 'hevc':
+                    cmd += ['-tag:v', 'hvc1']
+                if camera == 'q':
+                    cmd += ['-c:a', 'copy']
+                else:
+                    cmd += ['-an']
+                cmd += ['-movflags', '+faststart', tmpname]
 
-        if proc.returncode != 0:
-            raise web.HTTPInternalServerError()
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=120.0)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    raise web.HTTPGatewayTimeout()
 
-        mp4_bytes = Path(tmpname).read_bytes()
-    finally:
-        try:
-            os.unlink(tmpname)
-        except OSError:
-            pass
+                if proc.returncode != 0:
+                    raise web.HTTPInternalServerError()
 
-    if not mp4_bytes:
-        raise web.HTTPInternalServerError()
+                mp4_bytes = Path(tmpname).read_bytes()
+            finally:
+                try:
+                    os.unlink(tmpname)
+                except OSError:
+                    pass
+
+            if not mp4_bytes:
+                raise web.HTTPInternalServerError()
+
+            # Store in LRU cache, evict oldest if over limit
+            _mp4_cache[cache_key] = mp4_bytes
+            _mp4_cache.move_to_end(cache_key)
+            while len(_mp4_cache) > MAX_MP4_CACHE:
+                evicted_key, _ = _mp4_cache.popitem(last=False)
+                _mp4_locks.pop(evicted_key, None)
 
     total = len(mp4_bytes)
     base_headers: dict[str, str] = {
         'Content-Type': 'video/mp4',
         'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'public, max-age=3600',
         'X-Content-Type-Options': 'nosniff',
     }
 
