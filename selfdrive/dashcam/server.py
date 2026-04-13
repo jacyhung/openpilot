@@ -11,12 +11,10 @@ byte-range support so browsers and iOS can scrub freely.
 import asyncio
 import base64
 import collections
-import io
 import os
 import re
 import tempfile
 import time
-import wave
 from pathlib import Path
 
 from aiohttp import web
@@ -142,84 +140,85 @@ async def handle_api_route(request: web.Request) -> web.Response:
 
 
 async def handle_stream(request: web.Request) -> web.Response:
-    """Remux HEVC/H.264 → regular MP4 via ffmpeg, serve with full Range support.
+  """Build a regular MP4 via ffmpeg and serve it with full Range support.
 
-    The remuxed MP4 is cached in memory (LRU, up to MAX_MP4_CACHE entries) so
-    that subsequent Range sub-requests (including the iOS bytes=0-1 probe) all
-    serve from the *same* binary.  Without caching, every request would re-run
-    ffmpeg, producing a different file each time — the moov from request #1
-    wouldn't match the mdat from request #2, breaking seeking and iOS playback.
-    """
-    route_id = request.match_info['route_id']
-    camera   = request.match_info.get('camera', 'q')
-    try:
-        segment = int(request.match_info['segment'])
-    except (ValueError, KeyError):
-        raise web.HTTPBadRequest()
+  For qcamera, the output is video+embedded audio from qcamera.ts.
+  For f/d/e cameras, the output is that camera's video plus the audio track
+  from qcamera.ts. This keeps playback in a single media element so browser
+  controls handle mute, volume, buffering, and A/V sync natively.
+  """
+  route_id = request.match_info['route_id']
+  camera   = request.match_info.get('camera', 'q')
+  try:
+    segment = int(request.match_info['segment'])
+  except (ValueError, KeyError):
+    raise web.HTTPBadRequest()
 
-    video_path = _validate_video_path(route_id, segment, camera)
-    _, fmt = CAMERAS[camera]
+  video_path = _validate_video_path(route_id, segment, camera)
+  audio_path = _validate_video_path(route_id, segment, 'q') if camera != 'q' else None
+  _, fmt = CAMERAS[camera]
 
-    cache_key = (route_id, segment, camera)
+  cache_key = (route_id, segment, camera)
 
-    # Acquire a per-key lock so concurrent Range requests wait for a single
-    # ffmpeg run instead of each spawning their own.
-    if cache_key not in _mp4_locks:
-        _mp4_locks[cache_key] = asyncio.Lock()
-    lock = _mp4_locks[cache_key]
+  # Acquire a per-key lock so concurrent Range requests wait for a single
+  # ffmpeg run instead of each spawning their own.
+  if cache_key not in _mp4_locks:
+    _mp4_locks[cache_key] = asyncio.Lock()
+  lock = _mp4_locks[cache_key]
 
-    async with lock:
+  async with lock:
+    if cache_key in _mp4_cache:
+      # Move to end (most-recently used)
+      _mp4_cache.move_to_end(cache_key)
+      mp4_bytes = _mp4_cache[cache_key]
+    else:
+      # Run ffmpeg once; cache the result.
+      # Semaphore(2) ensures at most 2 concurrent remux processes on the device.
+      async with _remux_sem:
+        # Re-check cache: another request may have populated it while we waited
         if cache_key in _mp4_cache:
-            # Move to end (most-recently used)
-            _mp4_cache.move_to_end(cache_key)
-            mp4_bytes = _mp4_cache[cache_key]
+          _mp4_cache.move_to_end(cache_key)
+          mp4_bytes = _mp4_cache[cache_key]
         else:
-            # Run ffmpeg once; cache the result.
-            # Semaphore(2) ensures at most 2 concurrent remux processes on the device.
-            async with _remux_sem:
-                # Re-check cache: another request may have populated it while we waited
-                if cache_key in _mp4_cache:
-                    _mp4_cache.move_to_end(cache_key)
-                    mp4_bytes = _mp4_cache[cache_key]
-                else:
-                    tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
-                    os.close(tmp_fd)
-                    try:
-                        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
-                        if fmt:
-                            cmd += ['-f', fmt]
-                        cmd += ['-i', str(video_path), '-c:v', 'copy']
-                        if fmt == 'hevc':
-                            cmd += ['-tag:v', 'hvc1']
-                        if camera == 'q':
-                            cmd += ['-c:a', 'copy']
-                        else:
-                            cmd += ['-an']
-                        cmd += ['-movflags', '+faststart', tmpname]
+          tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
+          os.close(tmp_fd)
+          try:
+            cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
+            if fmt:
+              cmd += ['-f', fmt]
+            cmd += ['-i', str(video_path)]
+            if audio_path is not None:
+              cmd += ['-i', str(audio_path)]
+              cmd += ['-map', '0:v:0', '-map', '1:a:0?', '-c:v', 'copy', '-c:a', 'copy']
+            else:
+              cmd += ['-c:v', 'copy', '-c:a', 'copy']
+            if fmt == 'hevc':
+              cmd += ['-tag:v', 'hvc1']
+            cmd += ['-movflags', '+faststart', tmpname]
 
-                        proc = await asyncio.create_subprocess_exec(
-                            *cmd,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.DEVNULL,
-                        )
-                        try:
-                            await asyncio.wait_for(proc.communicate(), timeout=120.0)
-                        except asyncio.TimeoutError:
-                            try:
-                                proc.kill()
-                            except ProcessLookupError:
-                                pass
-                            raise web.HTTPGatewayTimeout()
+            proc = await asyncio.create_subprocess_exec(
+              *cmd,
+              stdout=asyncio.subprocess.DEVNULL,
+              stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+              await asyncio.wait_for(proc.communicate(), timeout=120.0)
+            except asyncio.TimeoutError:
+              try:
+                proc.kill()
+              except ProcessLookupError:
+                pass
+              raise web.HTTPGatewayTimeout()
 
-                        if proc.returncode != 0:
-                            raise web.HTTPInternalServerError()
+            if proc.returncode != 0:
+              raise web.HTTPInternalServerError()
 
-                        mp4_bytes = Path(tmpname).read_bytes()
-                    finally:
-                        try:
-                            os.unlink(tmpname)
-                        except OSError:
-                            pass
+            mp4_bytes = Path(tmpname).read_bytes()
+          finally:
+            try:
+              os.unlink(tmpname)
+            except OSError:
+              pass
 
             if not mp4_bytes:
                 raise web.HTTPInternalServerError()
@@ -309,96 +308,6 @@ def _scan_for_bookmarks(seg_dir: Path) -> list[float]:
         return bookmarks
     except Exception:
         return []
-
-
-# ---------------------------------------------------------------------------
-# Audio endpoint — extract rawAudioData PCM from rlog.zst, serve as WAV
-# ---------------------------------------------------------------------------
-
-def _extract_audio_wav(rlog_path: Path) -> bytes | None:
-    """Read rlog(.zst), extract rawAudioData messages, return WAV bytes or None."""
-    try:
-        import zstandard as zstd
-        import capnp  # noqa: F401
-        from cereal import log as capnp_log
-    except ImportError:
-        return None
-    try:
-        raw = rlog_path.read_bytes()
-        if raw[:4] == b'\x28\xB5\x2F\xFD':
-            dctx = zstd.ZstdDecompressor()
-            raw = dctx.decompress(raw, max_output_size=256 * 1024 * 1024)
-        events = capnp_log.Event.read_multiple_bytes(raw)
-        chunks: list[bytes] = []
-        sample_rate = 16000
-        for e in events:
-            try:
-                if e.which() == 'rawAudioData':
-                    rad = e.rawAudioData
-                    chunks.append(bytes(rad.data))
-                    sample_rate = rad.sampleRate
-            except Exception:
-                continue
-    except Exception:
-        return None
-    if not chunks:
-        return None
-    pcm = b''.join(chunks)
-    buf = io.BytesIO()
-    with wave.open(buf, 'wb') as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)   # int16
-        w.setframerate(sample_rate)
-        w.writeframes(pcm)
-    return buf.getvalue()
-
-
-async def handle_audio(request: web.Request) -> web.Response:
-    """Serve WAV audio extracted from the segment’s rlog.zst with Range support."""
-    route_id = request.match_info['route_id']
-    try:
-        segment = int(request.match_info['segment'])
-    except (ValueError, KeyError):
-        raise web.HTTPBadRequest()
-    if not ROUTE_ID_PATTERN.match(route_id):
-        raise web.HTTPBadRequest()
-    if not (0 <= segment <= 99999):
-        raise web.HTTPBadRequest()
-
-    realdata_resolved = REALDATA.resolve()
-    seg_dir = (REALDATA / f"{route_id}--{segment}").resolve()
-    if not str(seg_dir).startswith(str(realdata_resolved) + os.sep):
-        raise web.HTTPForbidden()
-
-    rlog = _rlog_path(seg_dir)
-    if not rlog:
-        raise web.HTTPNotFound()
-
-    loop = asyncio.get_event_loop()
-    wav_bytes = await loop.run_in_executor(None, _extract_audio_wav, rlog)
-    if not wav_bytes:
-        raise web.HTTPNotFound()
-
-    total = len(wav_bytes)
-    headers: dict[str, str] = {
-        'Content-Type': 'audio/wav',
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'public, max-age=3600',
-    }
-    range_val = request.headers.get('Range', '')
-    m = re.match(r'bytes=(\d+)-(\d*)', range_val)
-    if m:
-        start = int(m.group(1))
-        end = int(m.group(2)) if m.group(2) else total - 1
-        end = min(end, total - 1)
-        if start > end or start >= total:
-            return web.Response(status=416, headers={**headers, 'Content-Range': f'bytes */{total}'})
-        length = end - start + 1
-        return web.Response(
-            body=wav_bytes[start:end + 1], status=206,
-            headers={**headers, 'Content-Length': str(length), 'Content-Range': f'bytes {start}-{end}/{total}'},
-        )
-    return web.Response(body=wav_bytes, headers={**headers, 'Content-Length': str(total)})
 
 
 async def handle_api_bookmarks(request: web.Request) -> web.Response:
@@ -529,7 +438,6 @@ video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
       <!-- Video -->
       <div id="video-wrap">
         <video id="video" playsinline controls preload="auto" onended="onVideoEnded()"></video>
-        <audio id="audio-sync" preload="auto" style="display:none;"></audio>
         <div id="video-overlay">
           <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.069A1 1 0 0121 8.882v6.236a1 1 0 01-1.447.894L15 14M4 8h8a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4a2 2 0 012-2z"/>
@@ -575,7 +483,7 @@ video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
 
 <script>
 const CAMERAS = [
-  {key:'q', label:'Road (360p)', hasAudio: true},
+  {key:'q', label:'Road (360p)'},
   {key:'f', label:'Front'},
   {key:'d', label:'Driver'},
   {key:'e', label:'Wide'},
@@ -771,24 +679,10 @@ function playSegment(idx) {
   document.getElementById('prev-btn').disabled = idx <= 0;
   document.getElementById('next-btn').disabled = idx >= currentRoute.segments.length - 1;
 
-  // Stop external audio from the previous segment
-  const audio = document.getElementById('audio-sync');
-  audio.pause();
-  audio.src = '';
-  audio.removeAttribute('src');
-
-  // Load and play video — /stream endpoint pipes ffmpeg→fMP4
+  // Load and play video — each stream now includes its own audio track.
   const video = document.getElementById('video');
   video.src = `/stream/${currentRoute.id}/${seg}/${currentCam}`;
   video.load();
-
-  // For f/d/e cameras: load rlog audio (lightweight 16kHz WAV, ~2 MB).
-  // (q camera has audio muxed directly into the MP4 stream.)
-  const camInfo = CAMERAS.find(c => c.key === currentCam);
-  if (!camInfo?.hasAudio) {
-    audio.src = `/audio/${currentRoute.id}/${seg}`;
-    audio.load();
-  }
 
   video.play().catch(() => {});
   updateBookmarkRow(seg);
@@ -815,65 +709,6 @@ function updateBookmarkRow(seg) {
   row.innerHTML = '<span style="font-size:11px;color:#eab308;flex-shrink:0;">★ Jump:</span>'
     + bm.map(t => `<button class="bm-btn" onclick="document.getElementById('video').currentTime=${t}">${formatSeconds(t)}</button>`).join('');
 }
-
-// ── Audio sync ─────────────────────────────────────────────────────────────
-(function setupAudioSync() {
-  const video = document.getElementById('video');
-  const audio = document.getElementById('audio-sync');
-
-  function hasAudioSrc() {
-    return audio.src && audio.src !== window.location.href;
-  }
-
-  // When video stalls (buffering), pause audio but DON'T seek.
-  // Seeking on every stall-resume cycle causes audible click/pop glitches,
-  // especially on large cameras (front) that stall frequently.
-  video.addEventListener('waiting', () => {
-    if (hasAudioSrc()) audio.pause();
-  });
-
-  // When video actually starts playing (after stall or initial play),
-  // just un-pause audio from wherever it is. Don't seek — the drift from
-  // a short stall is inaudible. Periodic timeupdate will correct large drifts.
-  video.addEventListener('playing', () => {
-    if (hasAudioSrc() && audio.readyState >= 2) audio.play().catch(() => {});
-  });
-
-  // Start audio in sync when video first plays
-  video.addEventListener('play', () => {
-    if (!hasAudioSrc()) return;
-    if (audio.readyState >= 2) {
-      audio.currentTime = video.currentTime;
-      audio.play().catch(() => {});
-    }
-    // else: canplay fires when audio is ready
-  });
-
-  audio.addEventListener('canplay', () => {
-    if (!video.paused && hasAudioSrc()) {
-      audio.currentTime = video.currentTime;
-      audio.play().catch(() => {});
-    }
-  });
-
-  video.addEventListener('pause', () => { audio.pause(); });
-
-  // On explicit user seek: snap audio to the new position
-  video.addEventListener('seeked', () => {
-    if (!hasAudioSrc()) return;
-    audio.currentTime = video.currentTime;
-    if (!video.paused && audio.readyState >= 2) audio.play().catch(() => {});
-  });
-
-  // Periodic drift correction — only fires when video is actually playing
-  // and drift is large (> 1.5 s). Uses a wide threshold to avoid
-  // triggering on normal stall-accumulated drift which is < 0.3 s.
-  video.addEventListener('timeupdate', () => {
-    if (!hasAudioSrc() || audio.seeking || audio.paused) return;
-    const diff = Math.abs(audio.currentTime - video.currentTime);
-    if (diff > 1.5) audio.currentTime = video.currentTime;
-  });
-})();
 
 loadRoutes();
 </script>
@@ -909,7 +744,6 @@ def main() -> None:
     app.router.add_get('/api/route/{route_id}',              handle_api_route)
     app.router.add_get('/stream/{route_id}/{segment}',       handle_stream)
     app.router.add_get('/stream/{route_id}/{segment}/{camera}', handle_stream)
-    app.router.add_get('/audio/{route_id}/{segment}',         handle_audio)
     app.router.add_get('/api/bookmarks/{route_id}',           handle_api_bookmarks)
 
     web.run_app(app, host='0.0.0.0', port=PORT, access_log=None)
