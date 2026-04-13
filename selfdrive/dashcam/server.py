@@ -131,12 +131,13 @@ async def handle_api_route(request: web.Request) -> web.Response:
     raise web.HTTPNotFound()
 
 
-async def handle_stream(request: web.Request) -> web.StreamResponse:
-    """Remux HEVC (raw or inside TS) → fragmented MP4 via ffmpeg and stream it.
+async def handle_stream(request: web.Request) -> web.Response:
+    """Remux HEVC (raw or inside TS) → fragmented MP4 via ffmpeg.
 
-    No re-encoding: `-c:v copy` is fast and keeps the original quality.
-    The browser receives video/mp4 which it can decode using its native
-    H.265 support (Safari, Chrome with hardware decode, Edge).
+    The output is fully buffered so we can advertise Accept-Ranges and handle
+    byte-range requests, which iOS Safari requires before it will play video
+    from a plain <video src="..."> element.  The remux is a pure copy (no
+    re-encoding) so it completes in well under a second per segment.
     """
     route_id = request.match_info['route_id']
     camera   = request.match_info.get('camera', 'q')
@@ -155,8 +156,11 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
         '-i', str(video_path),
         '-c:v', 'copy',
     ]
-    # Pass through embedded audio for qcamera.ts (muxed in when RecordAudio is enabled).
-    # Raw .hevc files have no audio stream, so this is a no-op for f/d/e cameras.
+    if fmt == 'hevc':
+        # iOS Safari/Chrome require the hvc1 codec box tag (not the default hev1)
+        # to recognise and hardware-decode HEVC inside an MP4 container.
+        cmd += ['-tag:v', 'hvc1']
+    # Pass through embedded audio for qcamera.ts (muxed when RecordAudio is on).
     if camera == 'q':
         cmd += ['-c:a', 'copy']
     else:
@@ -167,35 +171,59 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
         'pipe:1',
     ]
 
-    response = web.StreamResponse(headers={
-        'Content-Type': 'video/mp4',
-        'Cache-Control': 'no-cache',
-        'X-Content-Type-Options': 'nosniff',
-    })
-    await response.prepare(request)
-
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        while True:
-            chunk = await proc.stdout.read(65536)
-            if not chunk:
-                break
-            try:
-                await response.write(chunk)
-            except ConnectionResetError:
-                break
-    finally:
+        mp4_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+    except asyncio.TimeoutError:
         try:
             proc.kill()
         except ProcessLookupError:
             pass
-        await proc.wait()
+        raise web.HTTPGatewayTimeout()
 
-    return response
+    if proc.returncode != 0 or not mp4_bytes:
+        raise web.HTTPInternalServerError()
+
+    total = len(mp4_bytes)
+    base_headers: dict[str, str] = {
+        'Content-Type': 'video/mp4',
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-cache',
+        'X-Content-Type-Options': 'nosniff',
+    }
+
+    # Handle Range requests — iOS Safari probes with "Range: bytes=0-1" before
+    # starting playback; without a proper 206 response it refuses to play.
+    range_val = request.headers.get('Range', '')
+    m = re.match(r'bytes=(\d+)-(\d*)', range_val)
+    if m:
+        start = int(m.group(1))
+        end   = int(m.group(2)) if m.group(2) else total - 1
+        end   = min(end, total - 1)
+        if start > end or start >= total:
+            return web.Response(
+                status=416,
+                headers={**base_headers, 'Content-Range': f'bytes */{total}'},
+            )
+        length = end - start + 1
+        return web.Response(
+            body=mp4_bytes[start:end + 1],
+            status=206,
+            headers={
+                **base_headers,
+                'Content-Length': str(length),
+                'Content-Range': f'bytes {start}-{end}/{total}',
+            },
+        )
+
+    return web.Response(
+        body=mp4_bytes,
+        headers={**base_headers, 'Content-Length': str(total)},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +282,36 @@ def _extract_audio_wav(rlog_path: Path) -> bytes | None:
     return buf.getvalue()
 
 
+def _scan_for_bookmarks(seg_dir: Path) -> list[float]:
+    """Return video timestamps (seconds from segment start) of userBookmark events."""
+    rlog = _rlog_path(seg_dir)
+    if not rlog:
+        return []
+    try:
+        import zstandard as zstd
+        from cereal import log as capnp_log
+
+        raw = rlog.read_bytes()
+        if raw[:4] == b'\x28\xB5\x2F\xFD':
+            dctx = zstd.ZstdDecompressor()
+            raw = dctx.decompress(raw, max_output_size=256 * 1024 * 1024)
+
+        events = capnp_log.Event.read_multiple_bytes(raw)
+        first_mono: int | None = None
+        bookmarks: list[float] = []
+        for e in events:
+            try:
+                if first_mono is None:
+                    first_mono = e.logMonoTime
+                if e.which() == 'userBookmark':
+                    bookmarks.append(round((e.logMonoTime - first_mono) / 1e9, 2))
+            except Exception:
+                continue
+        return bookmarks
+    except Exception:
+        return []
+
+
 async def handle_audio(request: web.Request) -> web.Response:
     """Stream WAV audio extracted from the segment's rlog.zst."""
     route_id = request.match_info['route_id']
@@ -287,6 +345,31 @@ async def handle_audio(request: web.Request) -> web.Response:
         content_type='audio/wav',
         headers={'Cache-Control': 'no-cache'},
     )
+
+
+async def handle_api_bookmarks(request: web.Request) -> web.Response:
+    """Return {segment_num: [timestamp_seconds, ...]} for segments with bookmarks."""
+    route_id = request.match_info['route_id']
+    if not ROUTE_ID_PATTERN.match(route_id):
+        raise web.HTTPBadRequest()
+
+    loop = asyncio.get_event_loop()
+    routes = await loop.run_in_executor(None, _scan_routes)
+    route = next((r for r in routes if r['id'] == route_id), None)
+    if not route:
+        raise web.HTTPNotFound()
+
+    realdata_resolved = REALDATA.resolve()
+    result: dict[int, list[float]] = {}
+    for seg_num in route['segments']:
+        seg_dir = (REALDATA / f"{route_id}--{seg_num}").resolve()
+        if not str(seg_dir).startswith(str(realdata_resolved) + os.sep):
+            continue
+        bookmarks = await loop.run_in_executor(None, _scan_for_bookmarks, seg_dir)
+        if bookmarks:
+            result[seg_num] = bookmarks
+
+    return web.json_response(result)
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +422,11 @@ video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
 .nav-btn:disabled{opacity:0.3;cursor:default;}
 .seg-chip{flex-shrink:0;padding:4px 10px;border-radius:6px;border:1px solid #3f3f46;background:#27272a;color:#a1a1aa;font-size:11px;font-family:ui-monospace,monospace;cursor:pointer;white-space:nowrap;touch-action:manipulation;transition:all 0.1s;}
 .seg-chip.active{background:#22c55e;border-color:#22c55e;color:#000;font-weight:700;}
+.seg-chip.bookmarked{border-color:#eab308;color:#ca8a04;}
+.seg-chip.bookmarked.active{background:#eab308;border-color:#eab308;color:#000;}
+#bookmark-row{display:flex;flex-wrap:wrap;gap:5px;align-items:center;}
+.bm-btn{padding:3px 8px;border-radius:5px;border:1px solid #eab308;background:transparent;color:#eab308;font-size:11px;font-family:ui-monospace,monospace;cursor:pointer;touch-action:manipulation;}
+.bm-btn:active{background:#eab308;color:#000;}
 #route-meta{display:flex;justify-content:space-between;align-items:center;gap:8px;}
 #route-title{font-size:13px;font-weight:500;line-height:1.3;}
 #route-sub{font-size:11px;color:#71717a;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -408,6 +496,8 @@ video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
         </div>
         <!-- Camera tabs -->
         <div style="display:flex;gap:5px;flex-wrap:wrap;" id="cam-tabs"></div>
+        <!-- Bookmark jump buttons (visible only when current segment has bookmarks) -->
+        <div id="bookmark-row" style="display:none;"></div>
       </div>
     </div>
 
@@ -447,6 +537,7 @@ let allRoutes = [];
 let currentRoute = null;
 let currentSegIdx = 0;
 let currentCam = 'q';
+let routeBookmarks = {};
 
 // ── Boot ─────────────────────────────────────────────────────────────────
 
@@ -545,18 +636,32 @@ async function selectRoute(routeId) {
 
   // re-render route list (update selected state)
   const q = document.getElementById('search-input').value.toLowerCase().trim();
-  const filtered = q ? allRoutes.filter(r => r.id.includes(q) || r.date.toLowerCase().includes(q) || r.time.toLowerCase().includes(q)) : allRoutes;
+  const filtered = q ? allRoutes.filter(r => r.id.includes(q) || formatDate(r.mtime).toLowerCase().includes(q) || formatTime(r.mtime).toLowerCase().includes(q)) : allRoutes;
   renderRouteList(filtered);
 
+  // Reset bookmarks then fetch in background — chips update when data arrives
+  routeBookmarks = {};
   renderSegStrip();
   playSegment(0);
+
+  fetch(`/api/bookmarks/${routeId}`)
+    .then(r => r.ok ? r.json() : {})
+    .then(bm => {
+      routeBookmarks = bm;
+      renderSegStrip();
+      updateBookmarkRow(currentRoute?.segments[currentSegIdx]);
+    })
+    .catch(() => {});
 }
 
 function renderSegStrip() {
   const strip = document.getElementById('seg-scroll');
-  strip.innerHTML = (currentRoute?.segments ?? []).map((seg, idx) =>
-    `<button class="seg-chip${idx===currentSegIdx?' active':''}" id="sc-${seg}" onclick="clickSeg(${idx})">${String(seg).padStart(2,'0')}</button>`
-  ).join('');
+  strip.innerHTML = (currentRoute?.segments ?? []).map((seg, idx) => {
+    const hasBm = (routeBookmarks[seg] || []).length > 0;
+    const cls = 'seg-chip' + (idx===currentSegIdx?' active':'') + (hasBm?' bookmarked':'');
+    const label = hasBm ? `★ ${String(seg).padStart(2,'0')}` : String(seg).padStart(2,'0');
+    return `<button class="${cls}" id="sc-${seg}" onclick="clickSeg(${idx})">${label}</button>`;
+  }).join('');
 
   // nav-btn state
   document.getElementById('prev-btn').disabled = currentSegIdx <= 0;
@@ -619,12 +724,29 @@ function playSegment(idx) {
   }
 
   video.play().catch(() => {});
+  updateBookmarkRow(seg);
 }
 
 function onVideoEnded() {
   if (currentRoute && currentSegIdx < currentRoute.segments.length - 1) {
     stepSegment(1);
   }
+}
+
+// ── Bookmarks ──────────────────────────────────────────────────────────────
+function formatSeconds(secs) {
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+function updateBookmarkRow(seg) {
+  const bm = (seg !== undefined && seg !== null) ? (routeBookmarks[seg] || []) : [];
+  const row = document.getElementById('bookmark-row');
+  if (!bm.length) { row.style.display = 'none'; return; }
+  row.style.display = 'flex';
+  row.innerHTML = '<span style="font-size:11px;color:#eab308;flex-shrink:0;">★ Jump:</span>'
+    + bm.map(t => `<button class="bm-btn" onclick="document.getElementById('video').currentTime=${t}">${formatSeconds(t)}</button>`).join('');
 }
 
 // ── Audio sync ─────────────────────────────────────────────────────────────
@@ -674,6 +796,7 @@ def main() -> None:
     app.router.add_get('/stream/{route_id}/{segment}',       handle_stream)
     app.router.add_get('/stream/{route_id}/{segment}/{camera}', handle_stream)
     app.router.add_get('/audio/{route_id}/{segment}',         handle_audio)
+    app.router.add_get('/api/bookmarks/{route_id}',           handle_api_bookmarks)
 
     web.run_app(app, host='0.0.0.0', port=PORT, access_log=None)
 
