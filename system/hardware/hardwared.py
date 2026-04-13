@@ -239,9 +239,9 @@ def hardware_thread(end_event, hw_queue) -> None:
         onroad_conditions["ignition"] = False
         cloudlog.error("panda timed out onroad")
 
-    # Force ignition when STARTED env var is set (dashcam mode)
+    # Force ignition when STARTED env var is set (dashcam mode), unless DashcamForceOffroad param is set
     if os.environ.get("STARTED") is not None:
-      onroad_conditions["ignition"] = True
+      onroad_conditions["ignition"] = not params.get_bool("DashcamForceOffroad")
 
     # Run at 2Hz, plus either edge of ignition
     ign_edge = (started_ts is not None) != all(onroad_conditions.values())

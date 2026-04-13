@@ -1,3 +1,5 @@
+import os
+import os
 from openpilot.common.time_helpers import system_time_valid
 from openpilot.system.ui.widgets.scroller import NavScroller
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigToggle, BigParamControl, BigCircleParamControl
@@ -69,7 +71,18 @@ class DeveloperLayoutMici(NavScroller):
                                               toggle_callback=lambda checked: (gui_app.set_show_touches(checked),
                                                                                gui_app.set_show_fps(checked)))
 
+    # Dashcam-only: toggle to temporarily go offroad (e.g. access offroad settings)
+    _dashcam_widgets = []
+    if os.environ.get("STARTED") is not None:
+      self._dashcam_offroad_toggle = BigToggle(
+        "go offroad (dashcam)",
+        initial_state=ui_state.params.get_bool("DashcamForceOffroad"),
+        toggle_callback=self._on_dashcam_force_offroad
+      )
+      _dashcam_widgets = [self._dashcam_offroad_toggle]
+
     self._scroller.add_widgets([
+      *_dashcam_widgets,
       self._adb_toggle,
       self._ssh_toggle,
       self._ssh_keys_btn,
@@ -178,4 +191,7 @@ class DeveloperLayoutMici(NavScroller):
     # TODO: show confirmation dialog before enabling
     ui_state.params.put_bool("AlphaLongitudinalEnabled", state)
     restart_needed_callback(state)
+
+  def _on_dashcam_force_offroad(self, state: bool):
+    ui_state.params.put_bool("DashcamForceOffroad", state)
     self._update_toggles()

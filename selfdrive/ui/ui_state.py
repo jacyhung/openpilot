@@ -1,3 +1,4 @@
+import os
 import pyray as rl
 import numpy as np
 import time
@@ -134,7 +135,12 @@ class UIState:
       self.light_sensor = -1
 
     # Update started state
-    self.started = self.sm["deviceState"].started and self.ignition
+    # In dashcam mode (STARTED env var), bypass panda ignition check.
+    # DashcamForceOffroad param lets the user manually go offroad from the UI.
+    if os.environ.get("STARTED") is not None:
+      self.started = self.sm["deviceState"].started and not self.params.get_bool("DashcamForceOffroad")
+    else:
+      self.started = self.sm["deviceState"].started and self.ignition
 
     # Update recording audio state
     self.recording_audio = self.params.get_bool("RecordAudio") and self.started
