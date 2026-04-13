@@ -138,7 +138,11 @@ class UIState:
     # In dashcam mode (STARTED env var), bypass panda ignition check.
     # DashcamForceOffroad param lets the user manually go offroad from the UI.
     if os.environ.get("STARTED") is not None:
-      self.started = self.sm["deviceState"].started and not self.params.get_bool("DashcamForceOffroad")
+      try:
+        force_offroad = self.params.get_bool("DashcamForceOffroad")
+      except Exception:
+        force_offroad = False
+      self.started = self.sm["deviceState"].started and not force_offroad
     else:
       self.started = self.sm["deviceState"].started and self.ignition
 

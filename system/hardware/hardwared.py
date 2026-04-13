@@ -241,7 +241,11 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     # Force ignition when STARTED env var is set (dashcam mode), unless DashcamForceOffroad param is set
     if os.environ.get("STARTED") is not None:
-      onroad_conditions["ignition"] = not params.get_bool("DashcamForceOffroad")
+      try:
+        force_offroad = params.get_bool("DashcamForceOffroad")
+      except Exception:
+        force_offroad = False
+      onroad_conditions["ignition"] = not force_offroad
 
     # Run at 2Hz, plus either edge of ignition
     ign_edge = (started_ts is not None) != all(onroad_conditions.values())

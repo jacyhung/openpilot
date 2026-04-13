@@ -74,9 +74,13 @@ class DeveloperLayoutMici(NavScroller):
     # Dashcam-only: toggle to temporarily go offroad (e.g. access offroad settings)
     _dashcam_widgets = []
     if os.environ.get("STARTED") is not None:
+      try:
+        _dashcam_offroad_initial = ui_state.params.get_bool("DashcamForceOffroad")
+      except Exception:
+        _dashcam_offroad_initial = False
       self._dashcam_offroad_toggle = BigToggle(
         "go offroad (dashcam)",
-        initial_state=ui_state.params.get_bool("DashcamForceOffroad"),
+        initial_state=_dashcam_offroad_initial,
         toggle_callback=self._on_dashcam_force_offroad
       )
       _dashcam_widgets = [self._dashcam_offroad_toggle]
