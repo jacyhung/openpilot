@@ -55,8 +55,12 @@ class DeveloperLayoutMici(NavScroller):
     self._long_maneuver_toggle = BigToggle("longitudinal maneuver mode",
                                            initial_state=ui_state.params.get_bool("LongitudinalManeuverMode"),
                                            toggle_callback=self._on_long_maneuver_mode)
+    try:
+      _lat_maneuver_initial = ui_state.params.get_bool("LateralManeuverMode")
+    except Exception:
+      _lat_maneuver_initial = False
     self._lat_maneuver_toggle = BigToggle("lateral maneuver mode",
-                                          initial_state=ui_state.params.get_bool("LateralManeuverMode"),
+                                          initial_state=_lat_maneuver_initial,
                                           toggle_callback=self._on_lat_maneuver_mode)
     self._alpha_long_toggle = BigToggle("alpha longitudinal",
                                         initial_state=ui_state.params.get_bool("AlphaLongitudinalEnabled"),
