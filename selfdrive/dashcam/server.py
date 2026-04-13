@@ -4,16 +4,15 @@ Routes are read from /data/media/0/realdata.  Each directory whose name
 matches  {bootcount}--{routehash}--{segnum}  is a one-minute segment.
 The server groups segments into routes and exposes them via a JSON API.
 
-Video is streamed by piping ffmpeg output (remux HEVC → fragmented MP4,
-no re-encode) so any browser that supports H.265 can play inline, and
-those that don't get a sensible error message.  The qcamera.ts file is
-a MPEG-TS container with HEVC inside, so it gets the same treatment.
+Video is remuxed by ffmpeg (HEVC/H.264 → regular MP4) and served with full
+byte-range support so browsers and iOS can scrub freely.
 """
 
 import asyncio
 import io
 import os
 import re
+import tempfile
 import time
 import wave
 from pathlib import Path
@@ -132,12 +131,21 @@ async def handle_api_route(request: web.Request) -> web.Response:
 
 
 async def handle_stream(request: web.Request) -> web.Response:
-    """Remux HEVC (raw or inside TS) → fragmented MP4 via ffmpeg.
+    """Remux HEVC/H.264 → regular MP4 via ffmpeg, serve with full Range support.
 
-    The output is fully buffered so we can advertise Accept-Ranges and handle
-    byte-range requests, which iOS Safari requires before it will play video
-    from a plain <video src="..."> element.  The remux is a pure copy (no
-    re-encoding) so it completes in well under a second per segment.
+    Key design decisions:
+    * Write to a temp file, not a pipe.  -movflags +faststart needs a seekable
+      output to rewrite the moov atom to the front of the file.  A pipe is not
+      seekable, so faststart is impossible with pipe:1.
+    * Use +faststart (moov at front), NOT fragmented / empty_moov MP4.
+      Fragmented MP4 with empty_moov stores codec parameters inside moof
+      fragments, not in the initial moov box.  iOS Safari/Chrome see an
+      essentially empty moov and refuse to play the video (slash icon).
+      With faststart, iOS reads the moov, sees the full codec descriptor, and
+      plays immediately.
+    * Serve with Accept-Ranges + correct 206 responses so the browser can seek
+      by byte offset → the moov chunk table maps bytes to timestamps correctly.
+    The remux is a copy-only pass and finishes in well under a second.
     """
     route_id = request.match_info['route_id']
     camera   = request.match_info.get('camera', 'q')
@@ -149,43 +157,48 @@ async def handle_stream(request: web.Request) -> web.Response:
     video_path = _validate_video_path(route_id, segment, camera)
     _, fmt = CAMERAS[camera]
 
-    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
-    if fmt:
-        cmd += ['-f', fmt]
-    cmd += [
-        '-i', str(video_path),
-        '-c:v', 'copy',
-    ]
-    if fmt == 'hevc':
-        # iOS Safari/Chrome require the hvc1 codec box tag (not the default hev1)
-        # to recognise and hardware-decode HEVC inside an MP4 container.
-        cmd += ['-tag:v', 'hvc1']
-    # Pass through embedded audio for qcamera.ts (muxed when RecordAudio is on).
-    if camera == 'q':
-        cmd += ['-c:a', 'copy']
-    else:
-        cmd += ['-an']
-    cmd += [
-        '-f', 'mp4',
-        '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-        'pipe:1',
-    ]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
+    # Use a temp file so ffmpeg can write a proper moov+mdat layout with faststart
+    tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
+    os.close(tmp_fd)
     try:
-        mp4_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=120.0)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        raise web.HTTPGatewayTimeout()
+        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
+        if fmt:
+            cmd += ['-f', fmt]
+        cmd += ['-i', str(video_path), '-c:v', 'copy']
+        if fmt == 'hevc':
+            # iOS requires the hvc1 codec box tag; ffmpeg defaults to hev1
+            cmd += ['-tag:v', 'hvc1']
+        if camera == 'q':
+            cmd += ['-c:a', 'copy']   # pass through embedded audio if present
+        else:
+            cmd += ['-an']
+        cmd += ['-movflags', '+faststart', tmpname]
 
-    if proc.returncode != 0 or not mp4_bytes:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=120.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            raise web.HTTPGatewayTimeout()
+
+        if proc.returncode != 0:
+            raise web.HTTPInternalServerError()
+
+        mp4_bytes = Path(tmpname).read_bytes()
+    finally:
+        try:
+            os.unlink(tmpname)
+        except OSError:
+            pass
+
+    if not mp4_bytes:
         raise web.HTTPInternalServerError()
 
     total = len(mp4_bytes)
@@ -196,8 +209,7 @@ async def handle_stream(request: web.Request) -> web.Response:
         'X-Content-Type-Options': 'nosniff',
     }
 
-    # Handle Range requests — iOS Safari probes with "Range: bytes=0-1" before
-    # starting playback; without a proper 206 response it refuses to play.
+    # Handle Range requests — needed for iOS probe (bytes=0-1) and for scrubbing
     range_val = request.headers.get('Range', '')
     m = re.match(r'bytes=(\d+)-(\d*)', range_val)
     if m:
