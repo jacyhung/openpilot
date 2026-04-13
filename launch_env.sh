@@ -25,3 +25,6 @@ export STAGING_ROOT="/data/safe_staging"
 export STARTED=1
 export FINGERPRINT="MOCK"
 export SKIP_FW_QUERY=1
+
+# Branch behavior: never upload logs, crash reports, or athena traffic to comma
+export DISABLE_COMMA_UPLOADS=1

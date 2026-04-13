@@ -1,4 +1,5 @@
 """Install exception handler for process crash."""
+import os
 import sentry_sdk
 from enum import Enum
 from sentry_sdk.integrations.threading import ThreadingIntegration
@@ -8,6 +9,9 @@ from openpilot.system.athena.registration import is_registered_device
 from openpilot.system.hardware import HARDWARE, PC
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.version import get_build_metadata, get_version
+
+
+DISABLE_COMMA_UPLOADS = os.getenv("DISABLE_COMMA_UPLOADS") is not None
 
 
 class SentryProject(Enum):
@@ -20,6 +24,9 @@ class SentryProject(Enum):
 def report_tombstone(fn: str, message: str, contents: str) -> None:
   cloudlog.error({'tombstone': message})
 
+  if DISABLE_COMMA_UPLOADS:
+    return
+
   with sentry_sdk.configure_scope() as scope:
     scope.set_extra("tombstone_fn", fn)
     scope.set_extra("tombstone", contents)
@@ -30,6 +37,9 @@ def report_tombstone(fn: str, message: str, contents: str) -> None:
 def capture_exception(*args, **kwargs) -> None:
   cloudlog.error("crash", exc_info=kwargs.get('exc_info', 1))
 
+  if DISABLE_COMMA_UPLOADS:
+    return
+
   try:
     sentry_sdk.capture_exception(*args, **kwargs)
     sentry_sdk.flush()  # https://github.com/getsentry/sentry-python/issues/291
@@ -38,10 +48,15 @@ def capture_exception(*args, **kwargs) -> None:
 
 
 def set_tag(key: str, value: str) -> None:
+  if DISABLE_COMMA_UPLOADS:
+    return
   sentry_sdk.set_tag(key, value)
 
 
 def init(project: SentryProject) -> bool:
+  if DISABLE_COMMA_UPLOADS:
+    return False
+
   build_metadata = get_build_metadata()
   # forks like to mess with this, so double check
   comma_remote = build_metadata.openpilot.comma_remote and "commaai" in build_metadata.openpilot.git_origin

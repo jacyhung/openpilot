@@ -384,6 +384,19 @@ html,body{height:100%;background:#09090b;color:#f4f4f5;font-family:system-ui,-ap
 #player-area{display:flex;flex-direction:column;flex:0 0 55%;min-height:0;}
 #list-drawer{flex:1;display:flex;flex-direction:column;border-top:1px solid #27272a;min-height:0;}
 
+@media(max-width:767px){
+  #app{height:auto;min-height:100dvh;}
+  #body{overflow:auto;}
+  #player-area{flex:0 0 auto;min-height:auto;}
+  #video-wrap{flex:0 0 auto;aspect-ratio:16/9;width:100%;max-height:42dvh;min-height:180px;overflow:hidden;}
+  #controls{padding:10px 12px calc(12px + env(safe-area-inset-bottom));}
+  #route-meta{align-items:flex-start;}
+  #route-sub{white-space:normal;overflow-wrap:anywhere;}
+  #list-drawer{min-height:260px;}
+  #route-list{padding:6px;}
+  .route-card{padding:10px;margin-bottom:5px;}
+}
+
 /* Desktop: row */
 @media(min-width:768px){
   #body{flex-direction:row;}

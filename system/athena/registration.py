@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import time
 import json
 import jwt
@@ -16,6 +17,7 @@ from openpilot.common.swaglog import cloudlog
 
 
 UNREGISTERED_DONGLE_ID = "UnregisteredDevice"
+DISABLE_COMMA_UPLOADS = os.getenv("DISABLE_COMMA_UPLOADS") is not None
 
 def is_registered_device() -> bool:
   dongle = Params().get("DongleId")
@@ -39,6 +41,13 @@ def register(show_spinner=False) -> str | None:
     # not all devices will have this; added early in comma 3X production (2/28/24)
     with open(Paths.persist_root()+"/comma/dongle_id") as f:
       dongle_id = f.read().strip()
+
+  if DISABLE_COMMA_UPLOADS:
+    if dongle_id is None:
+      dongle_id = UNREGISTERED_DONGLE_ID
+    params.put("DongleId", dongle_id)
+    set_offroad_alert("Offroad_UnregisteredHardware", (dongle_id == UNREGISTERED_DONGLE_ID) and not PC)
+    return dongle_id
 
   # Create registration token, in the future, this key will make JWTs directly
   jwt_algo, private_key, public_key = get_key_pair()
