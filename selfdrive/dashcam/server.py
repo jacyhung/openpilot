@@ -30,9 +30,10 @@ MAX_MP4_CACHE = 3
 _mp4_cache: collections.OrderedDict[tuple[str, int, str], bytes] = collections.OrderedDict()
 _mp4_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
 
-# Audio cache — keyed on (route_id, segment), stores audio extracted from qcamera.ts
-_audio_cache: collections.OrderedDict[tuple[str, int], bytes] = collections.OrderedDict()
-_audio_locks: dict[tuple[str, int], asyncio.Lock] = {}
+# Limit concurrent ffmpeg remux processes — copy-only remux is mostly I/O
+# but too many at once saturates the device and causes hangs. 2 is the sweet
+# spot: enough parallelism to feel fast, not so many the device OOMs.
+_remux_sem = asyncio.Semaphore(2)
 
 SEGMENT_PATTERN = re.compile(r'^([0-9a-f]+--[0-9a-f]+)--(\d+)$')
 ROUTE_ID_PATTERN = re.compile(r'^[0-9a-f]+--[0-9a-f]+$')
@@ -176,44 +177,51 @@ async def handle_stream(request: web.Request) -> web.Response:
             mp4_bytes = _mp4_cache[cache_key]
         else:
             # Run ffmpeg once; cache the result.
-            tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
-            os.close(tmp_fd)
-            try:
-                cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
-                if fmt:
-                    cmd += ['-f', fmt]
-                cmd += ['-i', str(video_path), '-c:v', 'copy']
-                if fmt == 'hevc':
-                    cmd += ['-tag:v', 'hvc1']
-                if camera == 'q':
-                    cmd += ['-c:a', 'copy']
+            # Semaphore(2) ensures at most 2 concurrent remux processes on the device.
+            async with _remux_sem:
+                # Re-check cache: another request may have populated it while we waited
+                if cache_key in _mp4_cache:
+                    _mp4_cache.move_to_end(cache_key)
+                    mp4_bytes = _mp4_cache[cache_key]
                 else:
-                    cmd += ['-an']
-                cmd += ['-movflags', '+faststart', tmpname]
-
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                try:
-                    await asyncio.wait_for(proc.communicate(), timeout=120.0)
-                except asyncio.TimeoutError:
+                    tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
+                    os.close(tmp_fd)
                     try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
-                    raise web.HTTPGatewayTimeout()
+                        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
+                        if fmt:
+                            cmd += ['-f', fmt]
+                        cmd += ['-i', str(video_path), '-c:v', 'copy']
+                        if fmt == 'hevc':
+                            cmd += ['-tag:v', 'hvc1']
+                        if camera == 'q':
+                            cmd += ['-c:a', 'copy']
+                        else:
+                            cmd += ['-an']
+                        cmd += ['-movflags', '+faststart', tmpname]
 
-                if proc.returncode != 0:
-                    raise web.HTTPInternalServerError()
+                        proc = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        try:
+                            await asyncio.wait_for(proc.communicate(), timeout=120.0)
+                        except asyncio.TimeoutError:
+                            try:
+                                proc.kill()
+                            except ProcessLookupError:
+                                pass
+                            raise web.HTTPGatewayTimeout()
 
-                mp4_bytes = Path(tmpname).read_bytes()
-            finally:
-                try:
-                    os.unlink(tmpname)
-                except OSError:
-                    pass
+                        if proc.returncode != 0:
+                            raise web.HTTPInternalServerError()
+
+                        mp4_bytes = Path(tmpname).read_bytes()
+                    finally:
+                        try:
+                            os.unlink(tmpname)
+                        except OSError:
+                            pass
 
             if not mp4_bytes:
                 raise web.HTTPInternalServerError()
@@ -788,11 +796,12 @@ function playSegment(idx) {
   video.src = `/stream/${currentRoute.id}/${seg}/${currentCam}`;
   video.load();
 
-  // For f/d/e cameras: load audio from qcamera.ts (separate audio-only endpoint).
-  // (q camera has audio muxed directly into the MP4 stream.)
+  // For f/d/e cameras: use the qcamera stream as the audio source. It has the
+  // same audio track that plays correctly in Road (360p) mode, reuses the cached
+  // MP4, and requires no separate ffmpeg extraction.
   const camInfo = CAMERAS.find(c => c.key === currentCam);
   if (!camInfo?.hasAudio) {
-    audio.src = `/audio/${currentRoute.id}/${seg}`;
+    audio.src = `/stream/${currentRoute.id}/${seg}/q`;
     audio.load();
   }
 
