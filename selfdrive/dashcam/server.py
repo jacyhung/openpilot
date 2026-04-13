@@ -29,6 +29,10 @@ MAX_MP4_CACHE = 3
 _mp4_cache: collections.OrderedDict[tuple[str, int, str], bytes] = collections.OrderedDict()
 _mp4_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
 
+# Only one ffmpeg remux at a time — the comma 4 can't handle multiple concurrent
+# remux processes without becoming unresponsive.
+_remux_sem = asyncio.Semaphore(1)
+
 SEGMENT_PATTERN = re.compile(r'^([0-9a-f]+--[0-9a-f]+)--(\d+)$')
 ROUTE_ID_PATTERN = re.compile(r'^[0-9a-f]+--[0-9a-f]+$')
 
@@ -170,45 +174,52 @@ async def handle_stream(request: web.Request) -> web.Response:
             _mp4_cache.move_to_end(cache_key)
             mp4_bytes = _mp4_cache[cache_key]
         else:
-            # Run ffmpeg once; cache the result
-            tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
-            os.close(tmp_fd)
-            try:
-                cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
-                if fmt:
-                    cmd += ['-f', fmt]
-                cmd += ['-i', str(video_path), '-c:v', 'copy']
-                if fmt == 'hevc':
-                    cmd += ['-tag:v', 'hvc1']
-                if camera == 'q':
-                    cmd += ['-c:a', 'copy']
+            # Run ffmpeg once; cache the result.
+            # Semaphore ensures only one remux runs at a time on the device.
+            async with _remux_sem:
+                # Re-check cache in case another request populated it while we waited
+                if cache_key in _mp4_cache:
+                    _mp4_cache.move_to_end(cache_key)
+                    mp4_bytes = _mp4_cache[cache_key]
                 else:
-                    cmd += ['-an']
-                cmd += ['-movflags', '+faststart', tmpname]
-
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                try:
-                    await asyncio.wait_for(proc.communicate(), timeout=120.0)
-                except asyncio.TimeoutError:
+                    tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
+                    os.close(tmp_fd)
                     try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
-                    raise web.HTTPGatewayTimeout()
+                        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
+                        if fmt:
+                            cmd += ['-f', fmt]
+                        cmd += ['-i', str(video_path), '-c:v', 'copy']
+                        if fmt == 'hevc':
+                            cmd += ['-tag:v', 'hvc1']
+                        if camera == 'q':
+                            cmd += ['-c:a', 'copy']
+                        else:
+                            cmd += ['-an']
+                        cmd += ['-movflags', '+faststart', tmpname]
 
-                if proc.returncode != 0:
-                    raise web.HTTPInternalServerError()
+                        proc = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        try:
+                            await asyncio.wait_for(proc.communicate(), timeout=120.0)
+                        except asyncio.TimeoutError:
+                            try:
+                                proc.kill()
+                            except ProcessLookupError:
+                                pass
+                            raise web.HTTPGatewayTimeout()
 
-                mp4_bytes = Path(tmpname).read_bytes()
-            finally:
-                try:
-                    os.unlink(tmpname)
-                except OSError:
-                    pass
+                        if proc.returncode != 0:
+                            raise web.HTTPInternalServerError()
+
+                        mp4_bytes = Path(tmpname).read_bytes()
+                    finally:
+                        try:
+                            os.unlink(tmpname)
+                        except OSError:
+                            pass
 
             if not mp4_bytes:
                 raise web.HTTPInternalServerError()
@@ -391,15 +402,19 @@ async def handle_api_bookmarks(request: web.Request) -> web.Response:
         raise web.HTTPNotFound()
 
     realdata_resolved = REALDATA.resolve()
-    result: dict[int, list[float]] = {}
+    # Scan all segments concurrently instead of sequentially — a 60-segment route
+    # would otherwise take 30-120s and starve the thread pool for all other requests.
+    valid_segs: list[int] = []
+    tasks = []
     for seg_num in route['segments']:
         seg_dir = (REALDATA / f"{route_id}--{seg_num}").resolve()
         if not str(seg_dir).startswith(str(realdata_resolved) + os.sep):
             continue
-        bookmarks = await loop.run_in_executor(None, _scan_for_bookmarks, seg_dir)
-        if bookmarks:
-            result[seg_num] = bookmarks
+        valid_segs.append(seg_num)
+        tasks.append(loop.run_in_executor(None, _scan_for_bookmarks, seg_dir))
 
+    bookmark_lists = await asyncio.gather(*tasks)
+    result = {seg: bm for seg, bm in zip(valid_segs, bookmark_lists) if bm}
     return web.json_response(result)
 
 
@@ -636,13 +651,19 @@ function onSearch(q) {
 
 // ── Route select & playback ───────────────────────────────────────────────
 
+// Generation counter: incremented on every selectRoute call so that stale
+// async completions (from a previous click) don't overwrite the current state.
+let _selectGen = 0;
+
 async function selectRoute(routeId) {
+  const gen = ++_selectGen;
   let route;
   try {
     const r = await fetch(`/api/route/${routeId}`);
     if (!r.ok) throw new Error(r.status);
     route = await r.json();
   } catch { return; }
+  if (gen !== _selectGen) return;  // superseded by a newer click
 
   currentRoute = route;
   currentSegIdx = 0;
@@ -675,9 +696,11 @@ async function selectRoute(routeId) {
   renderSegStrip();
   playSegment(0);
 
+  const bmGen = gen;
   fetch(`/api/bookmarks/${routeId}`)
     .then(r => r.ok ? r.json() : {})
     .then(bm => {
+      if (bmGen !== _selectGen) return;  // user switched routes before bookmarks loaded
       routeBookmarks = bm;
       renderSegStrip();
       updateBookmarkRow(currentRoute?.segments[currentSegIdx]);
