@@ -30,6 +30,10 @@ MAX_MP4_CACHE = 3
 _mp4_cache: collections.OrderedDict[tuple[str, int, str], bytes] = collections.OrderedDict()
 _mp4_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
 _remux_sem = asyncio.Semaphore(2)
+BOOKMARK_CACHE_TTL = 300.0
+_bookmark_cache: dict[str, tuple[float, dict[int, list[float]]]] = {}
+_bookmark_locks: dict[str, asyncio.Lock] = {}
+_bookmark_scan_sem = asyncio.Semaphore(2)
 
 SEGMENT_PATTERN = re.compile(r'^([0-9a-f]+--[0-9a-f]+)--(\d+)$')
 ROUTE_ID_PATTERN = re.compile(r'^[0-9a-f]+--[0-9a-f]+$')
@@ -180,6 +184,9 @@ async def handle_stream(request: web.Request) -> web.Response:
           _mp4_cache.move_to_end(cache_key)
           mp4_bytes = _mp4_cache[cache_key]
         else:
+          if request.transport is None or request.transport.is_closing():
+            return web.Response(status=499)
+
           tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
           os.close(tmp_fd)
           try:
@@ -220,15 +227,15 @@ async def handle_stream(request: web.Request) -> web.Response:
             except OSError:
               pass
 
-            if not mp4_bytes:
-                raise web.HTTPInternalServerError()
+          if not mp4_bytes:
+            raise web.HTTPInternalServerError()
 
-            # Store in LRU cache, evict oldest if over limit
-            _mp4_cache[cache_key] = mp4_bytes
-            _mp4_cache.move_to_end(cache_key)
-            while len(_mp4_cache) > MAX_MP4_CACHE:
-                evicted_key, _ = _mp4_cache.popitem(last=False)
-                _mp4_locks.pop(evicted_key, None)
+          # Store in LRU cache, evict oldest if over limit
+          _mp4_cache[cache_key] = mp4_bytes
+          _mp4_cache.move_to_end(cache_key)
+          while len(_mp4_cache) > MAX_MP4_CACHE:
+            evicted_key, _ = _mp4_cache.popitem(last=False)
+            _mp4_locks.pop(evicted_key, None)
 
     total = len(mp4_bytes)
     base_headers: dict[str, str] = {
@@ -316,27 +323,40 @@ async def handle_api_bookmarks(request: web.Request) -> web.Response:
     if not ROUTE_ID_PATTERN.match(route_id):
         raise web.HTTPBadRequest()
 
+    now = time.monotonic()
+    cached = _bookmark_cache.get(route_id)
+    if cached and now - cached[0] < BOOKMARK_CACHE_TTL:
+        return web.json_response(cached[1], headers={'Cache-Control': 'public, max-age=300'})
+
+    if route_id not in _bookmark_locks:
+        _bookmark_locks[route_id] = asyncio.Lock()
+
     loop = asyncio.get_event_loop()
-    routes = await loop.run_in_executor(None, _scan_routes)
-    route = next((r for r in routes if r['id'] == route_id), None)
-    if not route:
-        raise web.HTTPNotFound()
+    async with _bookmark_locks[route_id]:
+        now = time.monotonic()
+        cached = _bookmark_cache.get(route_id)
+        if cached and now - cached[0] < BOOKMARK_CACHE_TTL:
+            return web.json_response(cached[1], headers={'Cache-Control': 'public, max-age=300'})
 
-    realdata_resolved = REALDATA.resolve()
-    # Scan all segments concurrently instead of sequentially — a 60-segment route
-    # would otherwise take 30-120s and starve the thread pool for all other requests.
-    valid_segs: list[int] = []
-    tasks = []
-    for seg_num in route['segments']:
-        seg_dir = (REALDATA / f"{route_id}--{seg_num}").resolve()
-        if not str(seg_dir).startswith(str(realdata_resolved) + os.sep):
-            continue
-        valid_segs.append(seg_num)
-        tasks.append(loop.run_in_executor(None, _scan_for_bookmarks, seg_dir))
+        routes = await loop.run_in_executor(None, _scan_routes)
+        route = next((r for r in routes if r['id'] == route_id), None)
+        if not route:
+            raise web.HTTPNotFound()
 
-    bookmark_lists = await asyncio.gather(*tasks)
-    result = {seg: bm for seg, bm in zip(valid_segs, bookmark_lists) if bm}
-    return web.json_response(result)
+        realdata_resolved = REALDATA.resolve()
+
+        async def scan_segment(seg_num: int) -> tuple[int, list[float]]:
+            seg_dir = (REALDATA / f"{route_id}--{seg_num}").resolve()
+            if not str(seg_dir).startswith(str(realdata_resolved) + os.sep):
+                return seg_num, []
+            async with _bookmark_scan_sem:
+                bookmarks = await loop.run_in_executor(None, _scan_for_bookmarks, seg_dir)
+            return seg_num, bookmarks
+
+        results = await asyncio.gather(*(scan_segment(seg_num) for seg_num in route['segments']))
+        result = {seg: bm for seg, bm in results if bm}
+        _bookmark_cache[route_id] = (time.monotonic(), result)
+        return web.json_response(result, headers={'Cache-Control': 'public, max-age=300'})
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +524,13 @@ let currentRoute = null;
 let currentSegIdx = 0;
 let currentCam = 'q';
 let routeBookmarks = {};
+let currentStreamKey = '';
+const routeDetailsCache = new Map();
+const bookmarkCache = new Map();
+let _routeController = null;
+let _bookmarkController = null;
+let _bookmarkFetchTimer = null;
+let _initialPlayTimer = null;
 
 // ── Boot ─────────────────────────────────────────────────────────────────
 
@@ -538,7 +565,7 @@ function renderRouteList(routes) {
     const sel = currentRoute && currentRoute.id === r.id ? ' selected' : '';
     const d = formatDate(r.mtime);
     const t = formatTime(r.mtime);
-    return `<div class="route-card${sel}" onclick="selectRoute('${r.id}')">
+    return `<div class="route-card${sel}" data-route-id="${r.id}" onclick="selectRoute('${r.id}')">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
         <div style="min-width:0;">
           <div class="rc-date">${d}</div>
@@ -552,6 +579,12 @@ function renderRouteList(routes) {
       </div>
     </div>`;
   }).join('');
+}
+
+function updateRouteSelection(routeId) {
+  document.querySelectorAll('.route-card').forEach(card => {
+    card.classList.toggle('selected', card.dataset.routeId === routeId);
+  });
 }
 
 function updateCount(shown, total) {
@@ -577,12 +610,28 @@ let _selectGen = 0;
 
 async function selectRoute(routeId) {
   const gen = ++_selectGen;
-  let route;
-  try {
-    const r = await fetch(`/api/route/${routeId}`);
-    if (!r.ok) throw new Error(r.status);
-    route = await r.json();
-  } catch { return; }
+  clearTimeout(_bookmarkFetchTimer);
+  clearTimeout(_initialPlayTimer);
+  if (_routeController) _routeController.abort();
+  if (_bookmarkController) _bookmarkController.abort();
+
+  let route = routeDetailsCache.get(routeId);
+  if (!route) {
+    let controller = null;
+    try {
+      controller = new AbortController();
+      _routeController = controller;
+      const r = await fetch(`/api/route/${routeId}`, {signal: controller.signal});
+      if (!r.ok) throw new Error(r.status);
+      route = await r.json();
+      routeDetailsCache.set(routeId, route);
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+      return;
+    } finally {
+      if (_routeController === controller) _routeController = null;
+    }
+  }
   if (gen !== _selectGen) return;  // superseded by a newer click
 
   currentRoute = route;
@@ -606,26 +655,38 @@ async function selectRoute(routeId) {
     `<button class="cam-btn${c.key===currentCam?' active':''}" id="camtab-${c.key}" onclick="switchCam('${c.key}')">${c.label}</button>`
   ).join('');
 
-  // re-render route list (update selected state)
-  const q = document.getElementById('search-input').value.toLowerCase().trim();
-  const filtered = q ? allRoutes.filter(r => r.id.includes(q) || formatDate(r.mtime).toLowerCase().includes(q) || formatTime(r.mtime).toLowerCase().includes(q)) : allRoutes;
-  renderRouteList(filtered);
+  updateRouteSelection(routeId);
 
-  // Reset bookmarks then fetch in background — chips update when data arrives
-  routeBookmarks = {};
+  routeBookmarks = bookmarkCache.get(routeId) || {};
   renderSegStrip();
-  playSegment(0);
+  updateBookmarkRow(currentRoute?.segments[currentSegIdx]);
 
-  const bmGen = gen;
-  fetch(`/api/bookmarks/${routeId}`)
-    .then(r => r.ok ? r.json() : {})
-    .then(bm => {
-      if (bmGen !== _selectGen) return;  // user switched routes before bookmarks loaded
-      routeBookmarks = bm;
-      renderSegStrip();
-      updateBookmarkRow(currentRoute?.segments[currentSegIdx]);
-    })
-    .catch(() => {});
+  _initialPlayTimer = setTimeout(() => {
+    if (gen === _selectGen) playSegment(0);
+  }, 120);
+
+  if (bookmarkCache.has(routeId)) return;
+
+  _bookmarkFetchTimer = setTimeout(() => {
+    if (gen !== _selectGen) return;
+    const controller = new AbortController();
+    _bookmarkController = controller;
+    fetch(`/api/bookmarks/${routeId}`, {signal: controller.signal})
+      .then(r => r.ok ? r.json() : {})
+      .then(bm => {
+        if (gen !== _selectGen) return;
+        bookmarkCache.set(routeId, bm);
+        routeBookmarks = bm;
+        renderSegStrip();
+        updateBookmarkRow(currentRoute?.segments[currentSegIdx]);
+      })
+      .catch(e => {
+        if (e?.name !== 'AbortError') {}
+      })
+      .finally(() => {
+        if (_bookmarkController === controller) _bookmarkController = null;
+      });
+  }, 250);
 }
 
 function renderSegStrip() {
@@ -643,6 +704,7 @@ function renderSegStrip() {
 }
 
 function clickSeg(idx) {
+  if (idx === currentSegIdx) return;
   currentSegIdx = idx;
   renderSegStrip();
   playSegment(idx);
@@ -655,6 +717,7 @@ function stepSegment(delta) {
 }
 
 function switchCam(key) {
+  if (currentCam === key) return;
   currentCam = key;
   document.querySelectorAll('.cam-btn').forEach(b => b.classList.remove('active'));
   const btn = document.getElementById(`camtab-${key}`);
@@ -666,6 +729,7 @@ function playSegment(idx) {
   currentSegIdx = idx;
   if (!currentRoute) return;
   const seg = currentRoute.segments[idx];
+  const nextStreamKey = `${currentRoute.id}/${seg}/${currentCam}`;
 
   // Update chip highlight
   document.querySelectorAll('.seg-chip').forEach(c => c.classList.remove('active'));
@@ -679,9 +743,18 @@ function playSegment(idx) {
   document.getElementById('prev-btn').disabled = idx <= 0;
   document.getElementById('next-btn').disabled = idx >= currentRoute.segments.length - 1;
 
+  if (currentStreamKey === nextStreamKey) {
+    updateBookmarkRow(seg);
+    return;
+  }
+
   // Load and play video — each stream now includes its own audio track.
   const video = document.getElementById('video');
-  video.src = `/stream/${currentRoute.id}/${seg}/${currentCam}`;
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  currentStreamKey = nextStreamKey;
+  video.src = `/stream/${nextStreamKey}`;
   video.load();
 
   video.play().catch(() => {});
