@@ -125,7 +125,19 @@ def main() -> None:
       params.put("PandaSignatures", panda.get_signature())
 
       # check health for lost heartbeat
-      health = panda.health()
+      try:
+        health = panda.health()
+      except RuntimeError as e:
+        if "packet version mismatch" in str(e):
+          # Firmware protocol version mismatch (e.g. a DEV/DEBUG build is running).
+          # Force a full recovery so the correct firmware is flashed on next iteration.
+          cloudlog.error(f"panda health packet version mismatch, recovering: {e}")
+          try:
+            panda.recover(reset=True)
+          except Exception:
+            cloudlog.exception("panda.recover failed")
+          continue
+        raise
       if health["heartbeat_lost"]:
         params.put_bool("PandaHeartbeatLost", True)
         cloudlog.event("heartbeat lost", deviceState=health, serial=panda.get_usb_serial())

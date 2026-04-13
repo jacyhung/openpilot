@@ -234,7 +234,8 @@ def hardware_thread(end_event, hw_queue) -> None:
       in_car = pandaState.harnessStatus != log.PandaState.HarnessStatus.notConnected
 
     elif (time.monotonic() - sm.recv_time['pandaStates']) > DISCONNECT_TIMEOUT:
-      if onroad_conditions["ignition"]:
+      # In dashcam mode (STARTED env var) we never want panda timeout to drop ignition
+      if onroad_conditions["ignition"] and os.environ.get("STARTED") is None:
         onroad_conditions["ignition"] = False
         cloudlog.error("panda timed out onroad")
 
