@@ -24,8 +24,8 @@ REALDATA = Path(os.environ.get("DASHCAM_DATA_DIR", "/data/media/0/realdata"))
 PORT = int(os.environ.get("DASHCAM_PORT", "8082"))
 
 # LRU cache for remuxed MP4 bytes — avoids re-running ffmpeg on every Range
-# sub-request. Keyed on (route_id, segment, camera). ~10 entries ≈ 50-150 MB.
-MAX_MP4_CACHE = 10
+# sub-request. Keyed on (route_id, segment, camera). 3 entries ≈ 75-225 MB max.
+MAX_MP4_CACHE = 3
 _mp4_cache: collections.OrderedDict[tuple[str, int, str], bytes] = collections.OrderedDict()
 _mp4_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
 
@@ -752,6 +752,7 @@ function playSegment(idx) {
   const camInfo = CAMERAS.find(c => c.key === currentCam);
   if (!camInfo?.hasAudio) {
     audio.src = `/audio/${currentRoute.id}/${seg}`;
+    audio.load();  // start buffering immediately so canplay fires before video plays
   }
 
   video.play().catch(() => {});
@@ -785,23 +786,37 @@ function updateBookmarkRow(seg) {
   const video = document.getElementById('video');
   const audio = document.getElementById('audio-sync');
 
-  function syncAudio() {
-    if (!audio.src || audio.src === window.location.href) return;
-    const diff = Math.abs(audio.currentTime - video.currentTime);
-    if (diff > 0.3) audio.currentTime = video.currentTime;
+  function hasAudioSrc() {
+    return audio.src && audio.src !== window.location.href;
   }
 
-  video.addEventListener('play', () => {
-    if (audio.src && audio.src !== window.location.href) {
+  function syncAudio() {
+    // Don't touch audio until it has data and isn't mid-seek — that causes glitches
+    if (!hasAudioSrc() || audio.readyState < 2 || audio.seeking) return;
+    const diff = Math.abs(audio.currentTime - video.currentTime);
+    if (diff > 0.5) audio.currentTime = video.currentTime;
+  }
+
+  // If audio finishes loading after video already started playing, start it now
+  audio.addEventListener('canplay', () => {
+    if (!video.paused && hasAudioSrc()) {
       audio.currentTime = video.currentTime;
       audio.play().catch(() => {});
     }
   });
+
+  video.addEventListener('play', () => {
+    if (!hasAudioSrc()) return;
+    if (audio.readyState >= 2) {
+      audio.currentTime = video.currentTime;
+      audio.play().catch(() => {});
+    }
+    // else: canplay listener above will fire when audio is ready
+  });
   video.addEventListener('pause', () => { audio.pause(); });
   video.addEventListener('seeked', () => {
-    if (audio.src && audio.src !== window.location.href) {
-      audio.currentTime = video.currentTime;
-    }
+    if (!hasAudioSrc() || audio.readyState < 2) return;
+    audio.currentTime = video.currentTime;
   });
   video.addEventListener('timeupdate', syncAudio);
 })();
