@@ -284,8 +284,10 @@ class ModelRenderer(Widget):
 
   def _get_ll_color(self, prob: float, adjacent: bool, left: bool):
     alpha = np.clip(prob, 0.0, 0.7)
+    # In dashcam mode treat as ENGAGED so lines are green, not black
+    render_status = UIStatus.ENGAGED if os.environ.get("STARTED") is not None else ui_state.status
     if adjacent:
-      _base_color = LANE_LINE_COLORS.get(ui_state.status, LANE_LINE_COLORS[UIStatus.DISENGAGED])
+      _base_color = LANE_LINE_COLORS.get(render_status, LANE_LINE_COLORS[UIStatus.DISENGAGED])
       color = rl.Color(_base_color.r, _base_color.g, _base_color.b, int(alpha * 255))
 
       # turn adjacent lls orange if torque is high
@@ -300,7 +302,7 @@ class ModelRenderer(Widget):
     else:
       color = rl.Color(255, 255, 255, int(alpha * 255))
 
-    if ui_state.status == UIStatus.DISENGAGED:
+    if render_status == UIStatus.DISENGAGED:
       color = rl.Color(0, 0, 0, int(alpha * 255))
 
     return color
@@ -331,9 +333,12 @@ class ModelRenderer(Widget):
     allow_throttle = sm['longitudinalPlan'].allowThrottle or not self._longitudinal_control
     self._blend_filter.update(int(allow_throttle))
 
+    # In dashcam mode treat as ENGAGED so path is green, not black
+    render_status = UIStatus.ENGAGED if os.environ.get("STARTED") is not None else ui_state.status
+
     if self._experimental_mode:
       # Draw with acceleration coloring
-      if ui_state.status == UIStatus.DISENGAGED:
+      if render_status == UIStatus.DISENGAGED:
         draw_polygon(self._rect, self._path.projected_points, rl.Color(0, 0, 0, 90))
       elif len(self._exp_gradient.colors) > 1:
         draw_polygon(self._rect, self._path.projected_points, gradient=self._exp_gradient)
@@ -350,7 +355,7 @@ class ModelRenderer(Widget):
         stops=[0.0, 0.5, 1.0],
       )
 
-      if ui_state.status == UIStatus.DISENGAGED:
+      if render_status == UIStatus.DISENGAGED:
         draw_polygon(self._rect, self._path.projected_points, rl.Color(0, 0, 0, 90))
       else:
         draw_polygon(self._rect, self._path.projected_points, gradient=gradient)
