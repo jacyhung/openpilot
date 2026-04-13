@@ -9,25 +9,30 @@ byte-range support so browsers and iOS can scrub freely.
 """
 
 import asyncio
+import base64
 import collections
-import io
 import os
 import re
 import tempfile
 import time
-import wave
 from pathlib import Path
 
 from aiohttp import web
 
 REALDATA = Path(os.environ.get("DASHCAM_DATA_DIR", "/data/media/0/realdata"))
 PORT = int(os.environ.get("DASHCAM_PORT", "8082"))
+DASHCAM_USER = os.environ.get("DASHCAM_USER", "comma")
+DASHCAM_PASS = os.environ.get("DASHCAM_PASS", "comma")
 
 # LRU cache for remuxed MP4 bytes — avoids re-running ffmpeg on every Range
 # sub-request. Keyed on (route_id, segment, camera). 3 entries ≈ 75-225 MB max.
 MAX_MP4_CACHE = 3
 _mp4_cache: collections.OrderedDict[tuple[str, int, str], bytes] = collections.OrderedDict()
 _mp4_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
+
+# Audio cache — keyed on (route_id, segment), stores audio extracted from qcamera.ts
+_audio_cache: collections.OrderedDict[tuple[str, int], bytes] = collections.OrderedDict()
+_audio_locks: dict[tuple[str, int], asyncio.Lock] = {}
 
 SEGMENT_PATTERN = re.compile(r'^([0-9a-f]+--[0-9a-f]+)--(\d+)$')
 ROUTE_ID_PATTERN = re.compile(r'^[0-9a-f]+--[0-9a-f]+$')
@@ -258,7 +263,7 @@ async def handle_stream(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# Audio endpoint — extract rawAudioData PCM from rlog.zst and serve as WAV
+# Helpers for rlog-based bookmark scanning
 # ---------------------------------------------------------------------------
 
 def _rlog_path(seg_dir: Path) -> Path | None:
@@ -268,49 +273,6 @@ def _rlog_path(seg_dir: Path) -> Path | None:
         if p.exists():
             return p
     return None
-
-
-def _extract_audio_wav(rlog_path: Path) -> bytes | None:
-    """Read rlog(.zst), extract rawAudioData messages, return WAV bytes or None."""
-    try:
-        import zstandard as zstd  # available in openpilot venv
-        import capnp  # noqa: F401
-        from cereal import log as capnp_log
-    except ImportError:
-        return None
-
-    try:
-        raw = rlog_path.read_bytes()
-        # Decompress if zstd
-        if raw[:4] == b'\x28\xB5\x2F\xFD':
-            dctx = zstd.ZstdDecompressor()
-            raw = dctx.decompress(raw, max_output_size=256 * 1024 * 1024)
-
-        events = capnp_log.Event.read_multiple_bytes(raw)
-        chunks: list[bytes] = []
-        sample_rate = 16000
-        for e in events:
-            try:
-                if e.which() == 'rawAudioData':
-                    rad = e.rawAudioData
-                    chunks.append(bytes(rad.data))
-                    sample_rate = rad.sampleRate
-            except Exception:
-                continue
-    except Exception:
-        return None
-
-    if not chunks:
-        return None
-
-    pcm = b''.join(chunks)
-    buf = io.BytesIO()
-    with wave.open(buf, 'wb') as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)        # int16
-        w.setframerate(sample_rate)
-        w.writeframes(pcm)
-    return buf.getvalue()
 
 
 def _scan_for_bookmarks(seg_dir: Path) -> list[float]:
@@ -343,8 +305,12 @@ def _scan_for_bookmarks(seg_dir: Path) -> list[float]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# Audio endpoint — extract audio track from qcamera.ts via ffmpeg
+# ---------------------------------------------------------------------------
+
 async def handle_audio(request: web.Request) -> web.Response:
-    """Stream WAV audio extracted from the segment's rlog.zst."""
+    """Extract audio from qcamera.ts and serve as m4a. Cached like video."""
     route_id = request.match_info['route_id']
     try:
         segment = int(request.match_info['segment'])
@@ -355,27 +321,90 @@ async def handle_audio(request: web.Request) -> web.Response:
     if not (0 <= segment <= 99999):
         raise web.HTTPBadRequest()
 
+    # Validate path to qcamera.ts
     realdata_resolved = REALDATA.resolve()
     seg_dir = (REALDATA / f"{route_id}--{segment}").resolve()
     if not str(seg_dir).startswith(str(realdata_resolved) + os.sep):
         raise web.HTTPForbidden()
-    if not seg_dir.is_dir():
+    qcam = (seg_dir / 'qcamera.ts').resolve()
+    if not qcam.exists():
         raise web.HTTPNotFound()
 
-    rlog = _rlog_path(seg_dir)
-    if not rlog:
-        raise web.HTTPNotFound()
+    cache_key = (route_id, segment)
+    if cache_key not in _audio_locks:
+        _audio_locks[cache_key] = asyncio.Lock()
 
-    loop = asyncio.get_event_loop()
-    wav_bytes = await loop.run_in_executor(None, _extract_audio_wav, rlog)
-    if not wav_bytes:
-        raise web.HTTPNotFound()
+    async with _audio_locks[cache_key]:
+        if cache_key in _audio_cache:
+            _audio_cache.move_to_end(cache_key)
+            audio_bytes = _audio_cache[cache_key]
+        else:
+            # Extract audio only from qcamera.ts → m4a
+            tmp_fd, tmpname = tempfile.mkstemp(suffix='.m4a')
+            os.close(tmp_fd)
+            try:
+                cmd = [
+                    'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                    '-i', str(qcam),
+                    '-vn', '-c:a', 'copy',
+                    '-movflags', '+faststart',
+                    tmpname,
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    raise web.HTTPGatewayTimeout()
 
-    return web.Response(
-        body=wav_bytes,
-        content_type='audio/wav',
-        headers={'Cache-Control': 'no-cache'},
-    )
+                if proc.returncode != 0:
+                    raise web.HTTPNotFound()  # likely no audio track
+
+                audio_bytes = Path(tmpname).read_bytes()
+            finally:
+                try:
+                    os.unlink(tmpname)
+                except OSError:
+                    pass
+
+            if not audio_bytes:
+                raise web.HTTPNotFound()
+
+            _audio_cache[cache_key] = audio_bytes
+            _audio_cache.move_to_end(cache_key)
+            while len(_audio_cache) > MAX_MP4_CACHE:
+                evicted, _ = _audio_cache.popitem(last=False)
+                _audio_locks.pop(evicted, None)
+
+    total = len(audio_bytes)
+    headers: dict[str, str] = {
+        'Content-Type': 'audio/mp4',
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=3600',
+    }
+
+    range_val = request.headers.get('Range', '')
+    m = re.match(r'bytes=(\d+)-(\d*)', range_val)
+    if m:
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else total - 1
+        end = min(end, total - 1)
+        if start > end or start >= total:
+            return web.Response(status=416, headers={**headers, 'Content-Range': f'bytes */{total}'})
+        length = end - start + 1
+        return web.Response(
+            body=audio_bytes[start:end + 1], status=206,
+            headers={**headers, 'Content-Length': str(length), 'Content-Range': f'bytes {start}-{end}/{total}'},
+        )
+
+    return web.Response(body=audio_bytes, headers={**headers, 'Content-Length': str(total)})
 
 
 async def handle_api_bookmarks(request: web.Request) -> web.Response:
@@ -759,12 +788,12 @@ function playSegment(idx) {
   video.src = `/stream/${currentRoute.id}/${seg}/${currentCam}`;
   video.load();
 
-  // For f/d/e cameras: load separate audio from rlog if available.
+  // For f/d/e cameras: load audio from qcamera.ts (separate audio-only endpoint).
   // (q camera has audio muxed directly into the MP4 stream.)
   const camInfo = CAMERAS.find(c => c.key === currentCam);
   if (!camInfo?.hasAudio) {
     audio.src = `/audio/${currentRoute.id}/${seg}`;
-    audio.load();  // start buffering immediately so canplay fires before video plays
+    audio.load();
   }
 
   video.play().catch(() => {});
@@ -859,7 +888,21 @@ def main() -> None:
     import logging
     logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
-    app = web.Application()
+    # ── Basic auth middleware ──
+    _expected = base64.b64encode(f"{DASHCAM_USER}:{DASHCAM_PASS}".encode()).decode()
+
+    @web.middleware
+    async def basic_auth(request: web.Request, handler):
+        auth = request.headers.get('Authorization', '')
+        if auth == f'Basic {_expected}':
+            return await handler(request)
+        return web.Response(
+            status=401,
+            headers={'WWW-Authenticate': 'Basic realm="Dashcam"'},
+            text='Unauthorized',
+        )
+
+    app = web.Application(middlewares=[basic_auth])
     app.router.add_get('/',                                  handle_index)
     app.router.add_get('/api/routes',                        handle_api_routes)
     app.router.add_get('/api/route/{route_id}',              handle_api_route)
