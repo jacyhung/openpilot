@@ -221,8 +221,9 @@ class Device:
     if self._override_interactive_timeout is not None:
       return self._override_interactive_timeout
 
+    effective_ignition = ui_state.started if os.environ.get("STARTED") is not None else ui_state.ignition
     ignition_timeout = 10 if gui_app.big_ui() else 5
-    return ignition_timeout if ui_state.ignition else 30
+    return ignition_timeout if effective_ignition else 30
 
   def _reset_interactive_timeout(self) -> None:
     self._interaction_time = time.monotonic() + self.interactive_timeout
@@ -268,9 +269,14 @@ class Device:
         self._last_brightness = brightness
 
   def _update_wakefulness(self):
-    # Handle interactive timeout
-    ignition_just_turned_off = not ui_state.ignition and self._ignition
-    self._ignition = ui_state.ignition
+    # In dashcam mode the panda stays powered so ui_state.ignition remains True
+    # even when the user forces offroad via DashcamForceOffroad.  Use
+    # ui_state.started as the authority instead so the 30-second screen
+    # timeout fires correctly when the offroad toggle is engaged.
+    effective_ignition = ui_state.started if os.environ.get("STARTED") is not None else ui_state.ignition
+
+    ignition_just_turned_off = not effective_ignition and self._ignition
+    self._ignition = effective_ignition
 
     if ignition_just_turned_off or any(ev.left_down for ev in gui_app.mouse_events):
       self._reset_interactive_timeout()
@@ -281,7 +287,7 @@ class Device:
         callback()
     self._prev_timed_out = interaction_timeout
 
-    self._set_awake(ui_state.ignition or not interaction_timeout or PC)
+    self._set_awake(effective_ignition or not interaction_timeout or PC)
 
   def _set_awake(self, on: bool):
     if on != self._awake:
