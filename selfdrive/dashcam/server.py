@@ -11,10 +11,13 @@ byte-range support so browsers and iOS can scrub freely.
 import asyncio
 import base64
 import collections
+import io
+import math
 import os
 import re
 import tempfile
 import time
+import wave
 from pathlib import Path
 
 from aiohttp import web
@@ -34,6 +37,9 @@ BOOKMARK_CACHE_TTL = 300.0
 _bookmark_cache: dict[str, tuple[float, dict[int, list[float]]]] = {}
 _bookmark_locks: dict[str, asyncio.Lock] = {}
 _bookmark_scan_sem = asyncio.Semaphore(2)
+MAX_SEGMENT_MEDIA_CACHE = 8
+_segment_media_cache: collections.OrderedDict[tuple[str, int], dict] = collections.OrderedDict()
+_segment_media_locks: dict[tuple[str, int], asyncio.Lock] = {}
 
 SEGMENT_PATTERN = re.compile(r'^([0-9a-f]+--[0-9a-f]+)--(\d+)$')
 ROUTE_ID_PATTERN = re.compile(r'^[0-9a-f]+--[0-9a-f]+$')
@@ -159,7 +165,9 @@ async def handle_stream(request: web.Request) -> web.Response:
     raise web.HTTPBadRequest()
 
   video_path = _validate_video_path(route_id, segment, camera)
-  audio_path = _validate_video_path(route_id, segment, 'q') if camera != 'q' else None
+  segment_media = await _get_segment_media(route_id, segment) if camera != 'q' else None
+  audio_wav = segment_media['audio_wav'] if segment_media is not None else None
+  audio_path = _validate_video_path(route_id, segment, 'q') if camera != 'q' and audio_wav is None else None
   _, fmt = CAMERAS[camera]
 
   cache_key = (route_id, segment, camera)
@@ -189,12 +197,19 @@ async def handle_stream(request: web.Request) -> web.Response:
 
           tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
           os.close(tmp_fd)
+          audio_tmpname: str | None = None
           try:
             cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
             if fmt:
               cmd += ['-f', fmt]
             cmd += ['-i', str(video_path)]
-            if audio_path is not None:
+            if audio_wav is not None:
+              audio_fd, audio_tmpname = tempfile.mkstemp(suffix='.wav')
+              os.close(audio_fd)
+              Path(audio_tmpname).write_bytes(audio_wav)
+              cmd += ['-i', audio_tmpname]
+              cmd += ['-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-ac', '1', '-b:a', '96k', '-shortest']
+            elif audio_path is not None:
               cmd += ['-i', str(audio_path)]
               cmd += ['-map', '0:v:0', '-map', '1:a:0?', '-c:v', 'copy', '-c:a', 'copy']
             else:
@@ -222,6 +237,11 @@ async def handle_stream(request: web.Request) -> web.Response:
 
             mp4_bytes = Path(tmpname).read_bytes()
           finally:
+            if audio_tmpname is not None:
+              try:
+                os.unlink(audio_tmpname)
+              except OSError:
+                pass
             try:
               os.unlink(tmpname)
             except OSError:
@@ -317,6 +337,105 @@ def _scan_for_bookmarks(seg_dir: Path) -> list[float]:
         return []
 
 
+def _extract_segment_media(seg_dir: Path) -> dict:
+    rlog = _rlog_path(seg_dir)
+    result = {'audio_wav': None, 'speed_samples': [], 'speed_source': None}
+    if not rlog:
+        return result
+
+    try:
+        import zstandard as zstd
+        import capnp  # noqa: F401
+        from cereal import log as capnp_log
+
+        raw = rlog.read_bytes()
+        if raw[:4] == b'\x28\xB5\x2F\xFD':
+            dctx = zstd.ZstdDecompressor()
+            raw = dctx.decompress(raw, max_output_size=256 * 1024 * 1024)
+
+        events = capnp_log.Event.read_multiple_bytes(raw)
+        first_mono: int | None = None
+        chunks: list[bytes] = []
+        sample_rate = 16000
+        gps_samples: list[tuple[float, float]] = []
+        car_samples: list[tuple[float, float]] = []
+
+        for e in events:
+            try:
+                if first_mono is None:
+                    first_mono = e.logMonoTime
+                ts = round((e.logMonoTime - first_mono) / 1e9, 2)
+                which = e.which()
+                if which == 'rawAudioData':
+                    rad = e.rawAudioData
+                    chunks.append(bytes(rad.data))
+                    if rad.sampleRate > 0:
+                        sample_rate = rad.sampleRate
+                elif which == 'gpsLocationExternal':
+                    gps = e.gpsLocationExternal
+                    speed = float(gps.speed)
+                    if gps.hasFix and math.isfinite(speed) and speed >= 0.0:
+                        gps_samples.append((ts, speed))
+                elif which == 'carState':
+                    speed = float(e.carState.vEgo)
+                    if math.isfinite(speed) and speed >= 0.0:
+                        car_samples.append((ts, speed))
+            except Exception:
+                continue
+
+        if chunks:
+            pcm = b''.join(chunks)
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(pcm)
+            result['audio_wav'] = buf.getvalue()
+
+        if gps_samples:
+            result['speed_samples'] = gps_samples
+            result['speed_source'] = 'gps'
+        elif car_samples:
+            result['speed_samples'] = car_samples
+            result['speed_source'] = 'car'
+    except Exception:
+        return result
+
+    return result
+
+
+async def _get_segment_media(route_id: str, segment: int) -> dict:
+    cache_key = (route_id, segment)
+    if cache_key in _segment_media_cache:
+        _segment_media_cache.move_to_end(cache_key)
+        return _segment_media_cache[cache_key]
+
+    if cache_key not in _segment_media_locks:
+        _segment_media_locks[cache_key] = asyncio.Lock()
+
+    async with _segment_media_locks[cache_key]:
+        if cache_key in _segment_media_cache:
+            _segment_media_cache.move_to_end(cache_key)
+            return _segment_media_cache[cache_key]
+
+        realdata_resolved = REALDATA.resolve()
+        seg_dir = (REALDATA / f"{route_id}--{segment}").resolve()
+        if not str(seg_dir).startswith(str(realdata_resolved) + os.sep):
+            raise web.HTTPForbidden()
+        if not seg_dir.is_dir():
+            raise web.HTTPNotFound()
+
+        loop = asyncio.get_event_loop()
+        media = await loop.run_in_executor(None, _extract_segment_media, seg_dir)
+        _segment_media_cache[cache_key] = media
+        _segment_media_cache.move_to_end(cache_key)
+        while len(_segment_media_cache) > MAX_SEGMENT_MEDIA_CACHE:
+            evicted_key, _ = _segment_media_cache.popitem(last=False)
+            _segment_media_locks.pop(evicted_key, None)
+        return media
+
+
 async def handle_api_bookmarks(request: web.Request) -> web.Response:
     """Return {segment_num: [timestamp_seconds, ...]} for segments with bookmarks."""
     route_id = request.match_info['route_id']
@@ -359,6 +478,28 @@ async def handle_api_bookmarks(request: web.Request) -> web.Response:
         return web.json_response(result, headers={'Cache-Control': 'public, max-age=300'})
 
 
+async def handle_api_telemetry(request: web.Request) -> web.Response:
+    route_id = request.match_info['route_id']
+    if not ROUTE_ID_PATTERN.match(route_id):
+        raise web.HTTPBadRequest()
+    try:
+        segment = int(request.match_info['segment'])
+    except (ValueError, KeyError):
+        raise web.HTTPBadRequest()
+
+    media = await _get_segment_media(route_id, segment)
+    return web.json_response(
+        {
+            'source': media.get('speed_source'),
+            'samples': [
+                {'t': timestamp, 'speed': speed}
+                for timestamp, speed in media.get('speed_samples', [])
+            ],
+        },
+        headers={'Cache-Control': 'public, max-age=3600'},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Embedded single-page UI  (mobile-first, Tailwind CDN)
 # ---------------------------------------------------------------------------
@@ -396,6 +537,10 @@ html,body{height:100%;background:#09090b;color:#f4f4f5;font-family:system-ui,-ap
 video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
 #video-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#71717a;pointer-events:none;font-size:14px;}
 #video-overlay.hidden{display:none;}
+#speed-overlay{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;align-items:flex-end;gap:2px;padding:8px 10px;border-radius:10px;background:rgba(9,9,11,0.72);backdrop-filter:blur(6px);border:1px solid rgba(63,63,70,0.65);pointer-events:none;}
+#speed-overlay.hidden{display:none;}
+#speed-value{font-size:20px;font-weight:700;line-height:1;color:#fafafa;font-variant-numeric:tabular-nums;}
+#speed-source{font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#a1a1aa;}
 
 /* ── Controls strip (below video) ── */
 #controls{flex-shrink:0;background:#18181b;border-top:1px solid #27272a;padding:10px 14px;display:flex;flex-direction:column;gap:8px;}
@@ -458,6 +603,10 @@ video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
       <!-- Video -->
       <div id="video-wrap">
         <video id="video" playsinline controls preload="auto" onended="onVideoEnded()"></video>
+        <div id="speed-overlay" class="hidden">
+          <div id="speed-value">-- mph</div>
+          <div id="speed-source">GPS</div>
+        </div>
         <div id="video-overlay">
           <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.069A1 1 0 0121 8.882v6.236a1 1 0 01-1.447.894L15 14M4 8h8a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4a2 2 0 012-2z"/>
@@ -527,10 +676,14 @@ let routeBookmarks = {};
 let currentStreamKey = '';
 const routeDetailsCache = new Map();
 const bookmarkCache = new Map();
+const telemetryCache = new Map();
 let _routeController = null;
 let _bookmarkController = null;
+let _telemetryController = null;
 let _bookmarkFetchTimer = null;
 let _initialPlayTimer = null;
+let currentSpeedSamples = [];
+let currentSpeedSource = null;
 
 // ── Boot ─────────────────────────────────────────────────────────────────
 
@@ -602,6 +755,66 @@ function onSearch(q) {
   updateCount(filtered.length, allRoutes.length);
 }
 
+function resetSpeedOverlay() {
+  currentSpeedSamples = [];
+  currentSpeedSource = null;
+  document.getElementById('speed-overlay').classList.add('hidden');
+}
+
+function formatSpeed(speedMs) {
+  return `${Math.round(speedMs * 2.23694)} mph`;
+}
+
+function updateSpeedOverlayAt(currentTime) {
+  const overlay = document.getElementById('speed-overlay');
+  if (!currentSpeedSamples.length) {
+    overlay.classList.add('hidden');
+    return;
+  }
+
+  let sample = currentSpeedSamples[0];
+  for (const item of currentSpeedSamples) {
+    if (item.t > currentTime) break;
+    sample = item;
+  }
+
+  document.getElementById('speed-value').textContent = formatSpeed(sample.speed);
+  document.getElementById('speed-source').textContent = currentSpeedSource === 'gps' ? 'GPS speed' : 'Car speed';
+  overlay.classList.remove('hidden');
+}
+
+function loadSegmentTelemetry(seg) {
+  if (!currentRoute) return;
+  const cacheKey = `${currentRoute.id}/${seg}`;
+  const cached = telemetryCache.get(cacheKey);
+  if (cached) {
+    currentSpeedSamples = cached.samples || [];
+    currentSpeedSource = cached.source || null;
+    updateSpeedOverlayAt(document.getElementById('video').currentTime || 0);
+    return;
+  }
+
+  resetSpeedOverlay();
+  if (_telemetryController) _telemetryController.abort();
+  const controller = new AbortController();
+  _telemetryController = controller;
+  fetch(`/api/telemetry/${currentRoute.id}/${seg}`, {signal: controller.signal})
+    .then(r => r.ok ? r.json() : {samples: [], source: null})
+    .then(data => {
+      if (_telemetryController !== controller) return;
+      telemetryCache.set(cacheKey, data);
+      currentSpeedSamples = data.samples || [];
+      currentSpeedSource = data.source || null;
+      updateSpeedOverlayAt(document.getElementById('video').currentTime || 0);
+    })
+    .catch(e => {
+      if (e?.name !== 'AbortError') resetSpeedOverlay();
+    })
+    .finally(() => {
+      if (_telemetryController === controller) _telemetryController = null;
+    });
+}
+
 // ── Route select & playback ───────────────────────────────────────────────
 
 // Generation counter: incremented on every selectRoute call so that stale
@@ -614,6 +827,8 @@ async function selectRoute(routeId) {
   clearTimeout(_initialPlayTimer);
   if (_routeController) _routeController.abort();
   if (_bookmarkController) _bookmarkController.abort();
+  if (_telemetryController) _telemetryController.abort();
+  resetSpeedOverlay();
 
   let route = routeDetailsCache.get(routeId);
   if (!route) {
@@ -744,6 +959,7 @@ function playSegment(idx) {
   document.getElementById('next-btn').disabled = idx >= currentRoute.segments.length - 1;
 
   if (currentStreamKey === nextStreamKey) {
+    loadSegmentTelemetry(seg);
     updateBookmarkRow(seg);
     return;
   }
@@ -757,6 +973,7 @@ function playSegment(idx) {
   video.src = `/stream/${nextStreamKey}`;
   video.load();
 
+  loadSegmentTelemetry(seg);
   video.play().catch(() => {});
   updateBookmarkRow(seg);
 }
@@ -782,6 +999,13 @@ function updateBookmarkRow(seg) {
   row.innerHTML = '<span style="font-size:11px;color:#eab308;flex-shrink:0;">★ Jump:</span>'
     + bm.map(t => `<button class="bm-btn" onclick="document.getElementById('video').currentTime=${t}">${formatSeconds(t)}</button>`).join('');
 }
+
+(function setupVideoTelemetryOverlay() {
+  const video = document.getElementById('video');
+  video.addEventListener('timeupdate', () => { updateSpeedOverlayAt(video.currentTime); });
+  video.addEventListener('seeked', () => { updateSpeedOverlayAt(video.currentTime); });
+  video.addEventListener('loadedmetadata', () => { updateSpeedOverlayAt(video.currentTime); });
+})();
 
 loadRoutes();
 </script>
@@ -815,6 +1039,7 @@ def main() -> None:
     app.router.add_get('/',                                  handle_index)
     app.router.add_get('/api/routes',                        handle_api_routes)
     app.router.add_get('/api/route/{route_id}',              handle_api_route)
+    app.router.add_get('/api/telemetry/{route_id}/{segment}', handle_api_telemetry)
     app.router.add_get('/stream/{route_id}/{segment}',       handle_stream)
     app.router.add_get('/stream/{route_id}/{segment}/{camera}', handle_stream)
     app.router.add_get('/api/bookmarks/{route_id}',           handle_api_bookmarks)
