@@ -29,10 +29,6 @@ MAX_MP4_CACHE = 3
 _mp4_cache: collections.OrderedDict[tuple[str, int, str], bytes] = collections.OrderedDict()
 _mp4_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
 
-# Only one ffmpeg remux at a time — the comma 4 can't handle multiple concurrent
-# remux processes without becoming unresponsive.
-_remux_sem = asyncio.Semaphore(1)
-
 SEGMENT_PATTERN = re.compile(r'^([0-9a-f]+--[0-9a-f]+)--(\d+)$')
 ROUTE_ID_PATTERN = re.compile(r'^[0-9a-f]+--[0-9a-f]+$')
 
@@ -175,51 +171,44 @@ async def handle_stream(request: web.Request) -> web.Response:
             mp4_bytes = _mp4_cache[cache_key]
         else:
             # Run ffmpeg once; cache the result.
-            # Semaphore ensures only one remux runs at a time on the device.
-            async with _remux_sem:
-                # Re-check cache in case another request populated it while we waited
-                if cache_key in _mp4_cache:
-                    _mp4_cache.move_to_end(cache_key)
-                    mp4_bytes = _mp4_cache[cache_key]
+            tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
+            os.close(tmp_fd)
+            try:
+                cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
+                if fmt:
+                    cmd += ['-f', fmt]
+                cmd += ['-i', str(video_path), '-c:v', 'copy']
+                if fmt == 'hevc':
+                    cmd += ['-tag:v', 'hvc1']
+                if camera == 'q':
+                    cmd += ['-c:a', 'copy']
                 else:
-                    tmp_fd, tmpname = tempfile.mkstemp(suffix='.mp4')
-                    os.close(tmp_fd)
+                    cmd += ['-an']
+                cmd += ['-movflags', '+faststart', tmpname]
+
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=120.0)
+                except asyncio.TimeoutError:
                     try:
-                        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
-                        if fmt:
-                            cmd += ['-f', fmt]
-                        cmd += ['-i', str(video_path), '-c:v', 'copy']
-                        if fmt == 'hevc':
-                            cmd += ['-tag:v', 'hvc1']
-                        if camera == 'q':
-                            cmd += ['-c:a', 'copy']
-                        else:
-                            cmd += ['-an']
-                        cmd += ['-movflags', '+faststart', tmpname]
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    raise web.HTTPGatewayTimeout()
 
-                        proc = await asyncio.create_subprocess_exec(
-                            *cmd,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.DEVNULL,
-                        )
-                        try:
-                            await asyncio.wait_for(proc.communicate(), timeout=120.0)
-                        except asyncio.TimeoutError:
-                            try:
-                                proc.kill()
-                            except ProcessLookupError:
-                                pass
-                            raise web.HTTPGatewayTimeout()
+                if proc.returncode != 0:
+                    raise web.HTTPInternalServerError()
 
-                        if proc.returncode != 0:
-                            raise web.HTTPInternalServerError()
-
-                        mp4_bytes = Path(tmpname).read_bytes()
-                    finally:
-                        try:
-                            os.unlink(tmpname)
-                        except OSError:
-                            pass
+                mp4_bytes = Path(tmpname).read_bytes()
+            finally:
+                try:
+                    os.unlink(tmpname)
+                except OSError:
+                    pass
 
             if not mp4_bytes:
                 raise web.HTTPInternalServerError()
@@ -814,8 +803,10 @@ function updateBookmarkRow(seg) {
   }
 
   function syncAudio() {
-    // Don't touch audio until it has data and isn't mid-seek — that causes glitches
+    // Don't touch audio while video is stalled/buffering — that causes
+    // repeated seek-back glitches, especially on the large front camera.
     if (!hasAudioSrc() || audio.readyState < 2 || audio.seeking) return;
+    if (video.readyState < 3 || video.paused) return;  // video not actively playing
     const diff = Math.abs(audio.currentTime - video.currentTime);
     if (diff > 0.5) audio.currentTime = video.currentTime;
   }
@@ -823,6 +814,16 @@ function updateBookmarkRow(seg) {
   // If audio finishes loading after video already started playing, start it now
   audio.addEventListener('canplay', () => {
     if (!video.paused && hasAudioSrc()) {
+      audio.currentTime = video.currentTime;
+      audio.play().catch(() => {});
+    }
+  });
+
+  // Pause audio when video stalls (buffering); resume when it actually plays again.
+  // This prevents the audio-runs-ahead → sync-seeks-back → repeat glitch loop.
+  video.addEventListener('waiting', () => { if (hasAudioSrc()) audio.pause(); });
+  video.addEventListener('playing', () => {
+    if (hasAudioSrc() && audio.readyState >= 2) {
       audio.currentTime = video.currentTime;
       audio.play().catch(() => {});
     }
