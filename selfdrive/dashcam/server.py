@@ -790,6 +790,14 @@ let _livePc = null;
 let _liveCam = 'road';
 let _liveConnecting = false;
 let _overlayEnabled = true;
+let _turnConfig = null;
+
+async function fetchTurnConfig() {
+  try {
+    const r = await fetch('/turn', {credentials: 'include'});
+    if (r.ok) _turnConfig = await r.json();
+  } catch (e) {}
+}
 
 function setLiveStatus(text, cls) {
   const el = document.getElementById('live-status');
@@ -840,7 +848,11 @@ async function startLiveStream() {
   setLiveStatus('Connecting…', 'connecting');
 
   try {
-    const pc = new RTCPeerConnection({sdpSemantics: 'unified-plan'});
+    const pcConfig = {sdpSemantics: 'unified-plan'};
+    if (_turnConfig && _turnConfig.iceServers) {
+      pcConfig.iceServers = _turnConfig.iceServers;
+    }
+    const pc = new RTCPeerConnection(pcConfig);
     _livePc = pc;
 
     pc.addEventListener('track', function(evt) {
@@ -1369,6 +1381,7 @@ function updateBookmarkRow(seg) {
 
 switchTab('live');
 loadRoutes();
+fetchTurnConfig();
 </script>
 </body>
 </html>"""
@@ -1392,6 +1405,21 @@ class _StreamRequestBody:
             "bridge_services_in": self.bridge_services_in,
             "bridge_services_out": self.bridge_services_out,
         }
+
+
+async def handle_turn(request: web.Request) -> web.Response:
+    """Return TURN server configuration for WebRTC relay through NAT/proxy."""
+    urls = os.environ.get("TURN_URLS", "")
+    username = os.environ.get("TURN_USER", "")
+    credential = os.environ.get("TURN_PASS", "")
+    ice_servers = []
+    if urls:
+        ice_servers.append({
+            "urls": urls.split(","),
+            "username": username,
+            "credential": credential,
+        })
+    return web.json_response({"iceServers": ice_servers})
 
 
 async def handle_offer(request: web.Request) -> web.Response:
@@ -1479,6 +1507,7 @@ def main() -> None:
     app.router.add_get('/stream/{route_id}/{segment}',       handle_stream)
     app.router.add_get('/stream/{route_id}/{segment}/{camera}', handle_stream)
     app.router.add_get('/api/bookmarks/{route_id}',           handle_api_bookmarks)
+    app.router.add_get('/turn',                               handle_turn)
     app.router.add_post('/offer',                             handle_offer)
     app.router.add_get('/_debug',                            handle_debug)
 
