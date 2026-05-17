@@ -37,8 +37,15 @@ class TogglesLayoutMici(NavScroller):
       )
       _dashcam_widgets = [self._dashcam_offroad_toggle]
 
+    self._ir_brightness_toggle = BigMultiParamToggle(
+      "IR brightness",
+      "IrBrightness",
+      ["Auto", "Off", "25%", "50%", "75%"],
+    )
+
     self._scroller.add_widgets([
       *_dashcam_widgets,
+      self._ir_brightness_toggle,
       self._personality_toggle,
       self._experimental_btn,
       is_metric_toggle,
@@ -58,6 +65,9 @@ class TogglesLayoutMici(NavScroller):
       ("RecordFront", record_front),
       ("RecordAudio", record_mic),
       ("OpenpilotEnabledToggle", enable_openpilot),
+    )
+    self._refresh_multi_toggles = (
+      ("IrBrightness", self._ir_brightness_toggle),
     )
 
     enable_openpilot.set_enabled(lambda: not ui_state.engaged)
@@ -104,3 +114,10 @@ class TogglesLayoutMici(NavScroller):
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
       item.set_checked(ui_state.params.get_bool(key))
+    for key, item in self._refresh_multi_toggles:
+      try:
+        val = ui_state.params.get(key)
+        idx = int(val) if val is not None else 0
+        item.set_value(item._options[idx])
+      except Exception:
+        pass

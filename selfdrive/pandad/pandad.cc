@@ -311,6 +311,7 @@ void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control) 
       }
     }
 
+    static int ir_auto_pwr = 0;
     if (sm.updated("driverCameraState")) {
       auto event = sm["driverCameraState"];
       int cur_integ_lines = event.getDriverCameraState().getIntegLines();
@@ -327,23 +328,38 @@ void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control) 
       last_driver_camera_t = event.getLogMonoTime();
 
       if (cur_integ_lines <= CUTOFF_IL) {
-        ir_pwr = 0;
+        ir_auto_pwr = 0;
       } else if (cur_integ_lines > SATURATE_IL) {
-        ir_pwr = 100;
+        ir_auto_pwr = 100;
       } else {
-        ir_pwr = 100 * (cur_integ_lines - CUTOFF_IL) / (SATURATE_IL - CUTOFF_IL);
+        ir_auto_pwr = 100 * (cur_integ_lines - CUTOFF_IL) / (SATURATE_IL - CUTOFF_IL);
       }
     }
 
-    // Disable IR on input timeout
-    if (nanos_since_boot() - last_driver_camera_t > 1e9) {
-      ir_pwr = 0;
+    // Disable IR on input timeout (only when in auto mode)
+    int ir_brightness_setting = 0;
+    try {
+      ir_brightness_setting = std::stoi(params.get("IrBrightness"));
+    } catch (...) {}
+    bool ir_manual = ir_brightness_setting > 0;
+
+    if (!ir_manual && nanos_since_boot() - last_driver_camera_t > 1e9) {
+      ir_auto_pwr = 0;
+    }
+
+    if (ir_manual) {
+      // 0=Auto, 1=Off, 2=25%, 3=50%, 4=75% of auto value
+      static const int pct_map[] = {100, 0, 25, 50, 75};
+      int pct = pct_map[ir_brightness_setting];
+      ir_pwr = ir_auto_pwr * pct / 100;
+    } else {
+      ir_pwr = ir_auto_pwr;
     }
 
     if (ir_pwr != prev_ir_pwr || sm.frame % 100 == 0) {
-      int16_t ir_panda = util::map_val(ir_pwr, 0, 100, 0, MAX_IR_PANDA_VAL); 
+      int16_t ir_panda = util::map_val(ir_pwr, 0, 100, 0, MAX_IR_PANDA_VAL);
       panda->set_ir_pwr(ir_panda);
-      Hardware::set_ir_power(ir_pwr); 
+      Hardware::set_ir_power(ir_pwr);
       prev_ir_pwr = ir_pwr;
     }
   }
