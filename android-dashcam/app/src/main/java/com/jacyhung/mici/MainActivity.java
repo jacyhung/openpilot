@@ -57,6 +57,7 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setUseWideViewPort(true);
+        settings.setLoadWithOverviewMode(false);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         settings.setSupportZoom(false);
@@ -106,8 +107,8 @@ public class MainActivity extends Activity {
     }
 
     private void injectViewportScale() {
-        // Scale page 2.5x for 1600px automotive display.
-        // Lock layout viewport to 640px so mobile CSS triggers, then apply CSS zoom.
+        // 640px layout viewport triggers mobile CSS; 2.5x initial-scale fills 1600px screen.
+        // No CSS zoom so canvas overlay coordinates stay intact.
         String js = "(function() {" +
             "  var meta = document.querySelector('meta[name=viewport]');" +
             "  if (!meta) {" +
@@ -115,8 +116,7 @@ public class MainActivity extends Activity {
             "    meta.name = 'viewport';" +
             "    document.head.appendChild(meta);" +
             "  }" +
-            "  meta.content = 'width=640, initial-scale=1.0, user-scalable=no';" +
-            "  document.documentElement.style.zoom = '2.5';" +
+            "  meta.content = 'width=640, initial-scale=2.5, user-scalable=no';" +
             "  var style = document.getElementById('dashcam-scale-style');" +
             "  if (!style) {" +
             "    style = document.createElement('style');" +
