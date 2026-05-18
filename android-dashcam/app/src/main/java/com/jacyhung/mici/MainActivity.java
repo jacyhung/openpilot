@@ -57,7 +57,6 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setUseWideViewPort(true);
-        settings.setLoadWithOverviewMode(false);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         settings.setSupportZoom(false);
@@ -68,6 +67,9 @@ public class MainActivity extends Activity {
 
         webView.setWebChromeClient(new DashcamWebChromeClient());
         webView.setWebViewClient(new DashcamWebViewClient());
+
+        // Let WebView auto-scale the 640px layout to fill the 1600px screen
+        webView.setInitialScale(0);
 
         webView.loadUrl(DASHCAM_URL);
     }
@@ -107,8 +109,8 @@ public class MainActivity extends Activity {
     }
 
     private void injectViewportScale() {
-        // 640px layout viewport triggers mobile CSS; 2.5x initial-scale fills 1600px screen.
-        // No CSS zoom so canvas overlay coordinates stay intact.
+        // Lock layout viewport to 640px so mobile CSS triggers.
+        // WebView auto-calculates initial-scale to fit 640px into the screen.
         String js = "(function() {" +
             "  var meta = document.querySelector('meta[name=viewport]');" +
             "  if (!meta) {" +
@@ -116,7 +118,7 @@ public class MainActivity extends Activity {
             "    meta.name = 'viewport';" +
             "    document.head.appendChild(meta);" +
             "  }" +
-            "  meta.content = 'width=640, initial-scale=2.5, user-scalable=no';" +
+            "  meta.content = 'width=640, user-scalable=no';" +
             "  var style = document.getElementById('dashcam-scale-style');" +
             "  if (!style) {" +
             "    style = document.createElement('style');" +
