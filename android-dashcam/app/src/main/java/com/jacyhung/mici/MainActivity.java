@@ -106,7 +106,8 @@ public class MainActivity extends Activity {
     }
 
     private void injectViewportScale() {
-        // 4x scale for 1600px-wide automotive portrait display (width=400 -> 1600/400=4x)
+        // Scale page 2.5x for 1600px automotive display.
+        // Lock layout viewport to 640px so mobile CSS triggers, then apply CSS zoom.
         String js = "(function() {" +
             "  var meta = document.querySelector('meta[name=viewport]');" +
             "  if (!meta) {" +
@@ -114,7 +115,8 @@ public class MainActivity extends Activity {
             "    meta.name = 'viewport';" +
             "    document.head.appendChild(meta);" +
             "  }" +
-            "  meta.content = 'width=640, initial-scale=2.5, minimum-scale=2.5, maximum-scale=2.5, user-scalable=no';" +
+            "  meta.content = 'width=640, initial-scale=1.0, user-scalable=no';" +
+            "  document.documentElement.style.zoom = '2.5';" +
             "  var style = document.getElementById('dashcam-scale-style');" +
             "  if (!style) {" +
             "    style = document.createElement('style');" +
