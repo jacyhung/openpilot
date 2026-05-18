@@ -109,8 +109,8 @@ public class MainActivity extends Activity {
     }
 
     private void injectViewportScale() {
-        // Lock layout viewport to 640px so mobile CSS triggers.
-        // WebView auto-calculates initial-scale to fit 640px into the screen.
+        // 400px layout viewport triggers mobile CSS; WebView auto-fits to 1600px screen (~4x).
+        // Do NOT override display property on panels so JS tab switcher can hide/show them.
         String js = "(function() {" +
             "  var meta = document.querySelector('meta[name=viewport]');" +
             "  if (!meta) {" +
@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
             "    meta.name = 'viewport';" +
             "    document.head.appendChild(meta);" +
             "  }" +
-            "  meta.content = 'width=640, user-scalable=no';" +
+            "  meta.content = 'width=400, user-scalable=no';" +
             "  var style = document.getElementById('dashcam-scale-style');" +
             "  if (!style) {" +
             "    style = document.createElement('style');" +
@@ -131,7 +131,7 @@ public class MainActivity extends Activity {
             "      '#list-drawer { flex: 1 !important; display: flex !important; flex-direction: column !important; border-left: none !important; border-top: 1px solid #27272a !important; min-height: 0 !important; overflow: hidden !important; }' +" +
             "      '#video-wrap { flex: none !important; aspect-ratio: 16/9 !important; width: 100% !important; max-height: none !important; min-height: 0 !important; overflow: hidden !important; }' +" +
             "      'video { width: 100% !important; height: 100% !important; object-fit: contain !important; display: block !important; }' +" +
-            "      '#live-panel { flex: 1 !important; min-height: 0 !important; display: flex !important; flex-direction: column !important; }' +" +
+            "      '#live-panel, #dashcam-panel { flex: 1 !important; min-height: 0 !important; flex-direction: column !important; }' +" +
             "      '#live-video-wrap { flex: 1 !important; min-height: 0 !important; display: flex !important; align-items: center !important; justify-content: center !important; }' +" +
             "      '#live-video { width: 100% !important; height: 100% !important; object-fit: contain !important; }' +" +
             "      '#route-list { flex: 1 !important; overflow-y: auto !important; }';" +
