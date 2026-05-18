@@ -49,7 +49,6 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setUseWideViewPort(true);
-        settings.setLoadWithOverviewMode(true);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         settings.setSupportZoom(false);
@@ -99,7 +98,7 @@ public class MainActivity extends Activity {
     }
 
     private void injectViewportScale() {
-        // Scale the entire page 2x for the 1600x2560 automotive display
+        // Optimize layout for 1600x2560 automotive portrait display
         String js = "(function() {" +
             "  var meta = document.querySelector('meta[name=viewport]');" +
             "  if (!meta) {" +
@@ -107,30 +106,32 @@ public class MainActivity extends Activity {
             "    meta.name = 'viewport';" +
             "    document.head.appendChild(meta);" +
             "  }" +
-            "  meta.content = 'width=device-width, initial-scale=2.0, minimum-scale=2.0, maximum-scale=2.0, user-scalable=no';" +
+            "  meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no';" +
             "  var style = document.getElementById('dashcam-scale-style');" +
             "  if (!style) {" +
             "    style = document.createElement('style');" +
             "    style.id = 'dashcam-scale-style';" +
             "    style.textContent = " +
-            "      'html { font-size: 32px !important; }' +" +
-            "      'body { font-size: 32px !important; }' +" +
-            "      '#header { height: auto !important; padding: 24px 20px !important; }' +" +
-            "      '#header span { font-size: 48px !important; }' +" +
-            "      '.tab-btn { padding: 16px 32px !important; font-size: 28px !important; border-radius: 12px !important; }' +" +
-            "      '.cam-btn { padding: 16px 32px !important; font-size: 28px !important; border-radius: 12px !important; }' +" +
-            "      '#live-status { font-size: 28px !important; }' +" +
-            "      '#route-list { padding: 16px !important; }' +" +
-            "      '.route-card { padding: 24px !important; margin-bottom: 16px !important; border-radius: 20px !important; }' +" +
-            "      '.route-card .rc-date { font-size: 32px !important; }' +" +
-            "      '.route-card .rc-time { font-size: 28px !important; }' +" +
-            "      '#search-input { padding: 20px 24px !important; font-size: 32px !important; border-radius: 16px !important; }' +" +
-            "      '.seg-chip { padding: 12px 24px !important; font-size: 24px !important; border-radius: 12px !important; }' +" +
-            "      '.nav-btn { width: 64px !important; height: 64px !important; font-size: 32px !important; border-radius: 16px !important; }' +" +
-            "      '#refresh-btn { padding: 16px 28px !important; font-size: 28px !important; border-radius: 16px !important; }' +" +
-            "      '.bm-btn { padding: 10px 20px !important; font-size: 24px !important; }' +" +
-            "      'video { max-height: none !important; }' +" +
-            "      '#video-wrap { max-height: none !important; }';" +
+            "      'html, body { font-size: 24px !important; height: 100% !important; margin: 0 !important; overflow: hidden !important; }' +" +
+            "      '#app { display: flex !important; flex-direction: column !important; height: 100vh !important; }' +" +
+            "      '#header { flex-shrink: 0 !important; padding: 16px 20px !important; }' +" +
+            "      '#header span { font-size: 36px !important; }' +" +
+            "      '.tab-btn, .cam-btn { padding: 12px 24px !important; font-size: 22px !important; border-radius: 10px !important; }' +" +
+            "      '#live-status { font-size: 22px !important; }' +" +
+            "      '#video-wrap { flex: 1 !important; display: flex !important; align-items: center !important; justify-content: center !important; min-height: 0 !important; max-height: none !important; }' +" +
+            "      'video { width: 100% !important; height: 100% !important; object-fit: contain !important; max-height: none !important; }' +" +
+            "      '#route-list { padding: 12px !important; }' +" +
+            "      '.route-card { padding: 20px !important; margin-bottom: 12px !important; border-radius: 16px !important; }' +" +
+            "      '.route-card .rc-date { font-size: 28px !important; }' +" +
+            "      '.route-card .rc-time { font-size: 22px !important; }' +" +
+            "      '#search-input { padding: 16px 20px !important; font-size: 24px !important; border-radius: 12px !important; }' +" +
+            "      '.seg-chip { padding: 10px 20px !important; font-size: 20px !important; border-radius: 10px !important; }' +" +
+            "      '.nav-btn { width: 56px !important; height: 56px !important; font-size: 28px !important; border-radius: 14px !important; }' +" +
+            "      '#refresh-btn { padding: 12px 20px !important; font-size: 22px !important; border-radius: 12px !important; }' +" +
+            "      '.bm-btn { padding: 8px 16px !important; font-size: 20px !important; }' +" +
+            "      '#timeline-row { padding: 8px 12px !important; }' +" +
+            "      'input[type=range] { height: 40px !important; }' +" +
+            "      '#bookmark-panel { font-size: 22px !important; }';" +
             "    document.head.appendChild(style);" +
             "  }" +
             "})();";
