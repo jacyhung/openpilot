@@ -670,7 +670,7 @@ video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
   <!-- Live Panel (default) -->
   <div id="live-panel">
     <div id="live-video-wrap">
-      <video id="live-video" playsinline autoplay muted></video>
+      <video id="live-video" playsinline autoplay muted poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='360' viewBox='0 0 640 360'%3E%3Crect width='640' height='360' fill='%2309090b'/%3E%3Ccircle cx='320' cy='140' r='40' fill='none' stroke='%233f3f46' stroke-width='2'/%3E%3Cpolygon points='310,125 310,155 335,140' fill='%233f3f46'/%3E%3Ctext x='320' y='220' text-anchor='middle' fill='%2371717a' font-family='system-ui,sans-serif' font-size='16'%3ELive stream%3C/text%3E%3C/svg%3E"></video>
       <canvas id="live-canvas"></canvas>
       <div id="live-overlay" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#71717a;pointer-events:none;font-size:14px;z-index:3;">
         <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24">
@@ -697,7 +697,7 @@ video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
       <div id="player-area">
         <!-- Video -->
         <div id="video-wrap">
-          <video id="video" playsinline controls preload="metadata" onended="onVideoEnded()"></video>
+          <video id="video" playsinline controls preload="metadata" onended="onVideoEnded()" poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='360' viewBox='0 0 640 360'%3E%3Crect width='640' height='360' fill='%2309090b'/%3E%3Ccircle cx='320' cy='140' r='40' fill='none' stroke='%233f3f46' stroke-width='2'/%3E%3Cpolygon points='310,125 310,155 335,140' fill='%233f3f46'/%3E%3Ctext x='320' y='220' text-anchor='middle' fill='%2371717a' font-family='system-ui,sans-serif' font-size='16'%3ESelect a route%3C/text%3E%3C/svg%3E"></video>
           <div id="video-overlay">
             <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.069A1 1 0 0121 8.882v6.236a1 1 0 01-1.447.894L15 14M4 8h8a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4a2 2 0 012-2z"/>
