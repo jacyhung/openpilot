@@ -13,6 +13,14 @@
         android:name="android.hardware.type.automotive"
         android:required="false" />
 
+    <!-- Make camera and microphone optional so Play doesn't filter devices without them -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
