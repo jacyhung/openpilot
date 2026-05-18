@@ -106,7 +106,7 @@ public class MainActivity extends Activity {
     }
 
     private void injectViewportScale() {
-        // Optimized for 1600x2560 automotive portrait display
+        // 4x scale for 1600px-wide automotive portrait display (width=400 -> 1600/400=4x)
         String js = "(function() {" +
             "  var meta = document.querySelector('meta[name=viewport]');" +
             "  if (!meta) {" +
@@ -114,50 +114,25 @@ public class MainActivity extends Activity {
             "    meta.name = 'viewport';" +
             "    document.head.appendChild(meta);" +
             "  }" +
-            "  meta.content = 'width=640, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no';" +
+            "  meta.content = 'width=400, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no';" +
             "  var style = document.getElementById('dashcam-scale-style');" +
             "  if (!style) {" +
             "    style = document.createElement('style');" +
             "    style.id = 'dashcam-scale-style';" +
             "    style.textContent = " +
-            "      /* Full-height chain */" +
             "      'html, body { height: 100% !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; }' +" +
             "      '#app { display: flex !important; flex-direction: column !important; height: 100% !important; min-height: 0 !important; }' +" +
-            "      /* Force mobile column layout */" +
             "      '#body { flex-direction: column !important; min-height: 0 !important; }' +" +
             "      '#player-area { flex: 0 0 auto !important; min-height: 0 !important; }' +" +
             "      '#list-drawer { flex: 1 !important; display: flex !important; flex-direction: column !important; border-left: none !important; border-top: 1px solid #27272a !important; min-height: 0 !important; overflow: hidden !important; }' +" +
-            "      /* Video sizing - natural 16:9, no artificial max-height */" +
             "      '#video-wrap { flex: none !important; aspect-ratio: 16/9 !important; width: 100% !important; max-height: none !important; min-height: 0 !important; overflow: hidden !important; }' +" +
             "      'video { width: 100% !important; height: 100% !important; object-fit: contain !important; display: block !important; }' +" +
-            "      /* Live panel */" +
             "      '#live-panel { flex: 1 !important; min-height: 0 !important; display: flex !important; flex-direction: column !important; }' +" +
             "      '#live-video-wrap { flex: 1 !important; min-height: 0 !important; display: flex !important; align-items: center !important; justify-content: center !important; }' +" +
             "      '#live-video { width: 100% !important; height: 100% !important; object-fit: contain !important; }' +" +
-            "      /* Header - compact but touchable */" +
-            "      '#header { flex-shrink: 0 !important; padding: 12px 16px !important; height: auto !important; }' +" +
-            "      '#header span { font-size: 32px !important; }' +" +
-            "      /* Controls - compact */" +
-            "      '#controls { flex-shrink: 0 !important; padding: 8px 12px !important; }' +" +
-            "      '.tab-btn, .cam-btn { padding: 10px 20px !important; font-size: 20px !important; border-radius: 8px !important; }' +" +
-            "      '#live-status { font-size: 20px !important; }' +" +
-            "      '.nav-btn { width: 48px !important; height: 48px !important; font-size: 24px !important; border-radius: 12px !important; }' +" +
-            "      '.seg-chip { padding: 8px 16px !important; font-size: 18px !important; border-radius: 8px !important; }' +" +
-            "      '#refresh-btn { padding: 10px 16px !important; font-size: 20px !important; border-radius: 10px !important; }' +" +
-            "      /* Route list fills remaining space */" +
-            "      '#route-list { flex: 1 !important; overflow-y: auto !important; padding: 8px !important; }' +" +
-            "      '#list-header { flex-shrink: 0 !important; padding: 8px 12px !important; }' +" +
-            "      '.route-card { padding: 16px !important; margin-bottom: 8px !important; border-radius: 12px !important; }' +" +
-            "      '.route-card .rc-date { font-size: 24px !important; }' +" +
-            "      '.route-card .rc-time { font-size: 20px !important; }' +" +
-            "      '#search-input { padding: 12px 16px !important; font-size: 20px !important; border-radius: 10px !important; }' +" +
-            "      '.bm-btn { padding: 6px 12px !important; font-size: 18px !important; }' +" +
-            "      '#timeline-row { padding: 6px 8px !important; }' +" +
-            "      'input[type=range] { height: 36px !important; }' +" +
-            "      '#bookmark-panel { font-size: 20px !important; }';" +
+            "      '#route-list { flex: 1 !important; overflow-y: auto !important; }';" +
             "    document.head.appendChild(style);" +
             "  }" +
-            "  // Trigger resize/reflow after injection" +
             "  window.dispatchEvent(new Event('resize'));" +
             "})();";
         webView.evaluateJavascript(js, null);
