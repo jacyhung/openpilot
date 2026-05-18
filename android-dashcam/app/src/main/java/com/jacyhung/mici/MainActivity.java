@@ -114,7 +114,7 @@ public class MainActivity extends Activity {
             "    meta.name = 'viewport';" +
             "    document.head.appendChild(meta);" +
             "  }" +
-            "  meta.content = 'width=400, initial-scale=4.0, minimum-scale=4.0, maximum-scale=4.0, user-scalable=no';" +
+            "  meta.content = 'width=800, initial-scale=2.0, minimum-scale=2.0, maximum-scale=2.0, user-scalable=no';" +
             "  var style = document.getElementById('dashcam-scale-style');" +
             "  if (!style) {" +
             "    style = document.createElement('style');" +
