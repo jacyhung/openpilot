@@ -42,9 +42,6 @@
                 android:value="true" />
 
             <intent-filter>
-                <meta-data
-                    android:name="distractionOptimized"
-                    android:value="true" />
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
