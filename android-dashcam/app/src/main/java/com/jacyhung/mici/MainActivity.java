@@ -98,7 +98,7 @@ public class MainActivity extends Activity {
     }
 
     private void injectViewportScale() {
-        // Optimize layout for 1600x2560 automotive portrait display
+        // Force mobile/portrait layout regardless of 1600px width
         String js = "(function() {" +
             "  var meta = document.querySelector('meta[name=viewport]');" +
             "  if (!meta) {" +
@@ -106,21 +106,27 @@ public class MainActivity extends Activity {
             "    meta.name = 'viewport';" +
             "    document.head.appendChild(meta);" +
             "  }" +
-            "  meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no';" +
+            "  meta.content = 'width=640, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no';" +
             "  var style = document.getElementById('dashcam-scale-style');" +
             "  if (!style) {" +
             "    style = document.createElement('style');" +
             "    style.id = 'dashcam-scale-style';" +
             "    style.textContent = " +
+            "      /* Force mobile layout by overriding desktop media query */" +
+            "      '#body { flex-direction: column !important; }' +" +
+            "      '#player-area { flex: 0 0 auto !important; min-width: auto !important; }' +" +
+            "      '#list-drawer { flex: 1 !important; border-left: none !important; border-top: 1px solid #27272a !important; min-width: auto !important; }' +" +
+            "      '#video-wrap { aspect-ratio: 16/9 !important; width: 100% !important; max-height: 42dvh !important; min-height: 180px !important; flex: none !important; }' +" +
+            "      /* Typography scaling */" +
             "      'html, body { font-size: 24px !important; height: 100% !important; margin: 0 !important; overflow: hidden !important; }' +" +
-            "      '#app { display: flex !important; flex-direction: column !important; height: 100vh !important; }' +" +
-            "      '#header { flex-shrink: 0 !important; padding: 16px 20px !important; }' +" +
+            "      '#app { display: flex !important; flex-direction: column !important; height: 100dvh !important; min-height: 0 !important; }' +" +
+            "      '#header { flex-shrink: 0 !important; padding: 16px 20px !important; height: auto !important; }' +" +
             "      '#header span { font-size: 36px !important; }' +" +
             "      '.tab-btn, .cam-btn { padding: 12px 24px !important; font-size: 22px !important; border-radius: 10px !important; }' +" +
             "      '#live-status { font-size: 22px !important; }' +" +
-            "      '#video-wrap { flex: 1 !important; display: flex !important; align-items: center !important; justify-content: center !important; min-height: 0 !important; max-height: none !important; }' +" +
-            "      'video { width: 100% !important; height: 100% !important; object-fit: contain !important; max-height: none !important; }' +" +
-            "      '#route-list { padding: 12px !important; }' +" +
+            "      'video { width: 100% !important; height: 100% !important; object-fit: contain !important; display: block !important; }' +" +
+            "      '#live-video-wrap { flex: 1 !important; min-height: 0 !important; }' +" +
+            "      '#route-list { padding: 12px !important; flex: 1 !important; overflow-y: auto !important; }' +" +
             "      '.route-card { padding: 20px !important; margin-bottom: 12px !important; border-radius: 16px !important; }' +" +
             "      '.route-card .rc-date { font-size: 28px !important; }' +" +
             "      '.route-card .rc-time { font-size: 22px !important; }' +" +
