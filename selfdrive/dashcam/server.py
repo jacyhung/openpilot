@@ -997,10 +997,31 @@ function _positionLiveCanvas() {
 
   const vRect = video.getBoundingClientRect();
   const wRect = wrap.getBoundingClientRect();
-  const left = vRect.left - wRect.left;
-  const top = vRect.top - wRect.top;
-  const vw = Math.round(vRect.width);
-  const vh = Math.round(vRect.height);
+
+  // When object-fit:contain letterboxes the video, the element rect is larger
+  // than the actual video frame. Compute the true frame bounds so the overlay
+  // aligns to the image, not the black bars.
+  const elW = video.clientWidth;
+  const elH = video.clientHeight;
+  const vidW = video.videoWidth || 1928;
+  const vidH = video.videoHeight || 1208;
+  const elAR = elW / elH;
+  const vidAR = vidW / vidH;
+  let frameW = elW, frameH = elH, offsetX = 0, offsetY = 0;
+  if (vidAR > elAR) {
+    // Video is wider than element: black bars top/bottom
+    frameH = elW / vidAR;
+    offsetY = (elH - frameH) / 2;
+  } else if (vidAR < elAR) {
+    // Video is taller than element: black bars left/right
+    frameW = elH * vidAR;
+    offsetX = (elW - frameW) / 2;
+  }
+
+  const left = (vRect.left - wRect.left) + offsetX;
+  const top = (vRect.top - wRect.top) + offsetY;
+  const vw = Math.round(frameW);
+  const vh = Math.round(frameH);
 
   canvas.style.left = left + 'px';
   canvas.style.top = top + 'px';
