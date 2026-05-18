@@ -11,6 +11,7 @@ import android.util.Log;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.webkit.ConsoleMessage;
 import android.webkit.PermissionRequest;
 import android.webkit.SslErrorHandler;
@@ -38,6 +39,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Edge-to-edge fullscreen
+        getWindow().setFlags(
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        );
+
         setContentView(R.layout.activity_main);
 
         webView = findViewById(R.id.webview);
@@ -98,7 +106,7 @@ public class MainActivity extends Activity {
     }
 
     private void injectViewportScale() {
-        // Force mobile/portrait layout regardless of 1600px width
+        // Optimized for 1600x2560 automotive portrait display
         String js = "(function() {" +
             "  var meta = document.querySelector('meta[name=viewport]');" +
             "  if (!meta) {" +
@@ -112,34 +120,45 @@ public class MainActivity extends Activity {
             "    style = document.createElement('style');" +
             "    style.id = 'dashcam-scale-style';" +
             "    style.textContent = " +
-            "      /* Force mobile layout by overriding desktop media query */" +
-            "      '#body { flex-direction: column !important; }' +" +
-            "      '#player-area { flex: 0 0 auto !important; min-width: auto !important; }' +" +
-            "      '#list-drawer { flex: 1 !important; border-left: none !important; border-top: 1px solid #27272a !important; min-width: auto !important; }' +" +
-            "      '#video-wrap { aspect-ratio: 16/9 !important; width: 100% !important; max-height: 42dvh !important; min-height: 180px !important; flex: none !important; }' +" +
-            "      /* Typography scaling */" +
-            "      'html, body { font-size: 24px !important; height: 100% !important; margin: 0 !important; overflow: hidden !important; }' +" +
-            "      '#app { display: flex !important; flex-direction: column !important; height: 100dvh !important; min-height: 0 !important; }' +" +
-            "      '#header { flex-shrink: 0 !important; padding: 16px 20px !important; height: auto !important; }' +" +
-            "      '#header span { font-size: 36px !important; }' +" +
-            "      '.tab-btn, .cam-btn { padding: 12px 24px !important; font-size: 22px !important; border-radius: 10px !important; }' +" +
-            "      '#live-status { font-size: 22px !important; }' +" +
+            "      /* Full-height chain */" +
+            "      'html, body { height: 100% !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; }' +" +
+            "      '#app { display: flex !important; flex-direction: column !important; height: 100% !important; min-height: 0 !important; }' +" +
+            "      /* Force mobile column layout */" +
+            "      '#body { flex-direction: column !important; min-height: 0 !important; }' +" +
+            "      '#player-area { flex: 0 0 auto !important; min-height: 0 !important; }' +" +
+            "      '#list-drawer { flex: 1 !important; display: flex !important; flex-direction: column !important; border-left: none !important; border-top: 1px solid #27272a !important; min-height: 0 !important; overflow: hidden !important; }' +" +
+            "      /* Video sizing - natural 16:9, no artificial max-height */" +
+            "      '#video-wrap { flex: none !important; aspect-ratio: 16/9 !important; width: 100% !important; max-height: none !important; min-height: 0 !important; overflow: hidden !important; }' +" +
             "      'video { width: 100% !important; height: 100% !important; object-fit: contain !important; display: block !important; }' +" +
-            "      '#live-video-wrap { flex: 1 !important; min-height: 0 !important; }' +" +
-            "      '#route-list { padding: 12px !important; flex: 1 !important; overflow-y: auto !important; }' +" +
-            "      '.route-card { padding: 20px !important; margin-bottom: 12px !important; border-radius: 16px !important; }' +" +
-            "      '.route-card .rc-date { font-size: 28px !important; }' +" +
-            "      '.route-card .rc-time { font-size: 22px !important; }' +" +
-            "      '#search-input { padding: 16px 20px !important; font-size: 24px !important; border-radius: 12px !important; }' +" +
-            "      '.seg-chip { padding: 10px 20px !important; font-size: 20px !important; border-radius: 10px !important; }' +" +
-            "      '.nav-btn { width: 56px !important; height: 56px !important; font-size: 28px !important; border-radius: 14px !important; }' +" +
-            "      '#refresh-btn { padding: 12px 20px !important; font-size: 22px !important; border-radius: 12px !important; }' +" +
-            "      '.bm-btn { padding: 8px 16px !important; font-size: 20px !important; }' +" +
-            "      '#timeline-row { padding: 8px 12px !important; }' +" +
-            "      'input[type=range] { height: 40px !important; }' +" +
-            "      '#bookmark-panel { font-size: 22px !important; }';" +
+            "      /* Live panel */" +
+            "      '#live-panel { flex: 1 !important; min-height: 0 !important; display: flex !important; flex-direction: column !important; }' +" +
+            "      '#live-video-wrap { flex: 1 !important; min-height: 0 !important; display: flex !important; align-items: center !important; justify-content: center !important; }' +" +
+            "      '#live-video { width: 100% !important; height: 100% !important; object-fit: contain !important; }' +" +
+            "      /* Header - compact but touchable */" +
+            "      '#header { flex-shrink: 0 !important; padding: 12px 16px !important; height: auto !important; }' +" +
+            "      '#header span { font-size: 32px !important; }' +" +
+            "      /* Controls - compact */" +
+            "      '#controls { flex-shrink: 0 !important; padding: 8px 12px !important; }' +" +
+            "      '.tab-btn, .cam-btn { padding: 10px 20px !important; font-size: 20px !important; border-radius: 8px !important; }' +" +
+            "      '#live-status { font-size: 20px !important; }' +" +
+            "      '.nav-btn { width: 48px !important; height: 48px !important; font-size: 24px !important; border-radius: 12px !important; }' +" +
+            "      '.seg-chip { padding: 8px 16px !important; font-size: 18px !important; border-radius: 8px !important; }' +" +
+            "      '#refresh-btn { padding: 10px 16px !important; font-size: 20px !important; border-radius: 10px !important; }' +" +
+            "      /* Route list fills remaining space */" +
+            "      '#route-list { flex: 1 !important; overflow-y: auto !important; padding: 8px !important; }' +" +
+            "      '#list-header { flex-shrink: 0 !important; padding: 8px 12px !important; }' +" +
+            "      '.route-card { padding: 16px !important; margin-bottom: 8px !important; border-radius: 12px !important; }' +" +
+            "      '.route-card .rc-date { font-size: 24px !important; }' +" +
+            "      '.route-card .rc-time { font-size: 20px !important; }' +" +
+            "      '#search-input { padding: 12px 16px !important; font-size: 20px !important; border-radius: 10px !important; }' +" +
+            "      '.bm-btn { padding: 6px 12px !important; font-size: 18px !important; }' +" +
+            "      '#timeline-row { padding: 6px 8px !important; }' +" +
+            "      'input[type=range] { height: 36px !important; }' +" +
+            "      '#bookmark-panel { font-size: 20px !important; }';" +
             "    document.head.appendChild(style);" +
             "  }" +
+            "  // Trigger resize/reflow after injection" +
+            "  window.dispatchEvent(new Event('resize'));" +
             "})();";
         webView.evaluateJavascript(js, null);
     }
